@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "comfyui-petscii"
-version = "0.1.0"
+version = "0.2.0"
 description = "Convert images and video to C64 PETSCII — optimal glyph and colour matching in Oklab, with temporal hysteresis"
 readme = "README.md"
 requires-python = ">=3.10"

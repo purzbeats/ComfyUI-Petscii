@@ -18,14 +18,15 @@ from comfy_api.latest import ComfyExtension, io, ui
 # Relative, not absolute: dropping this pack into `custom_nodes/` does not put
 # `src/` on sys.path, so `import petscii_core` would only work for a pip install.
 from .petscii_core import (
+    CrtSettings,
     PetsciiFrame,
     Settings,
+    apply_crt,
     convert,
     convert_batch,
     encode_petv,
     palette_names,
     render_frame,
-    scanline_overlay,
     subset_names,
 )
 from .petscii_core.render import add_border
@@ -106,14 +107,21 @@ def _to_tensor(frames: list[np.ndarray]) -> torch.Tensor:
     return torch.from_numpy(stacked)
 
 
-def _render_all(data: PetsciiData, scale: int, scanlines: float, border: int) -> torch.Tensor:
+def _render_all(
+    data: PetsciiData,
+    scale: int,
+    border: int,
+    crt: CrtSettings | None = None,
+) -> torch.Tensor:
     images = []
     for frame in data.frames:
         image = render_frame(frame, scale)
-        if scanlines > 0:
-            image = scanline_overlay(image, scanlines, scale)
+        # Border first, so the CRT's curvature and vignette bend the frame too
+        # rather than stopping at the edge of the screen.
         if border > 0:
             image = add_border(image, frame.border, border * scale)
+        if crt is not None:
+            image = apply_crt(image, crt, scale)
         images.append(image)
     return _to_tensor(images)
 
@@ -187,7 +195,7 @@ class PETSCIIConvert(io.ComfyNode):
         )
         frames = [convert(frame, settings) for frame in _to_numpy(image)]
         data = PetsciiData(frames=frames, charset=settings.charset)
-        rendered = _render_all(data, render_scale, 0.0, 0)
+        rendered = _render_all(data, render_scale, 0)
         return io.NodeOutput(rendered, data, ui=ui.PreviewImage(rendered, cls=cls))
 
 
@@ -267,7 +275,7 @@ class PETSCIIVideoConvert(io.ComfyNode):
             _to_numpy(images), settings, temporal=True, bg_sample=background_sample
         )
         data = PetsciiData(frames=frames, charset=settings.charset, fps=fps)
-        rendered = _render_all(data, render_scale, 0.0, 0)
+        rendered = _render_all(data, render_scale, 0)
         return io.NodeOutput(rendered, data, ui=ui.PreviewImage(rendered, cls=cls))
 
 
@@ -281,21 +289,13 @@ class PETSCIIRender(io.ComfyNode):
             display_name="PETSCII Render",
             category=CATEGORY,
             description=(
-                "Renders PETSCII data to images at an integer scale. Separate from "
-                "conversion so you can change scale, border or scanlines without "
-                "paying for the conversion again."
+                "Renders PETSCII data to images at an integer scale, with an optional "
+                "CRT treatment. Separate from conversion so you can change the look "
+                "without paying for the conversion again."
             ),
             inputs=[
                 io.Custom(PETSCII_TYPE).Input("petscii"),
                 io.Int.Input("scale", default=3, min=1, max=8),
-                io.Float.Input(
-                    "scanlines",
-                    default=0.0,
-                    min=0.0,
-                    max=1.0,
-                    step=0.01,
-                    tooltip="Darkens one row per scale step. Needs scale >= 2 to show.",
-                ),
                 io.Int.Input(
                     "border",
                     default=0,
@@ -303,6 +303,22 @@ class PETSCIIRender(io.ComfyNode):
                     max=32,
                     tooltip="Border thickness in screen pixels, before scaling.",
                 ),
+                io.Boolean.Input(
+                    "crt",
+                    default=False,
+                    tooltip=(
+                        "Scanlines, aperture grille, barrel distortion, phosphor glow, "
+                        "vignette and chroma bleed. Effect sizes follow the PETSCII grid, "
+                        "so the look is the same at any scale — but scale 3 or more is "
+                        "needed for scanlines to have room to show."
+                    ),
+                ),
+                io.Float.Input("crt_scanlines", default=0.45, min=0.0, max=1.0, step=0.01),
+                io.Float.Input("crt_curvature", default=0.35, min=0.0, max=1.0, step=0.01),
+                io.Float.Input("crt_glow", default=0.5, min=0.0, max=2.0, step=0.01),
+                io.Float.Input("crt_vignette", default=0.4, min=0.0, max=1.0, step=0.01),
+                io.Float.Input("crt_chroma", default=0.3, min=0.0, max=1.0, step=0.01),
+                io.Float.Input("crt_brightness", default=1.05, min=0.2, max=2.0, step=0.01),
             ],
             outputs=[io.Image.Output(display_name="images")],
         )
@@ -312,12 +328,30 @@ class PETSCIIRender(io.ComfyNode):
         cls,
         petscii: PetsciiData,
         scale: int,
-        scanlines: float,
         border: int,
+        crt: bool,
+        crt_scanlines: float,
+        crt_curvature: float,
+        crt_glow: float,
+        crt_vignette: float,
+        crt_chroma: float,
+        crt_brightness: float,
     ) -> io.NodeOutput:
         if not petscii.frames:
             raise ValueError("PETSCII input holds no frames")
-        rendered = _render_all(petscii, scale, scanlines, border)
+        settings = (
+            CrtSettings(
+                scanlines=crt_scanlines,
+                curvature=crt_curvature,
+                glow=crt_glow,
+                vignette=crt_vignette,
+                chroma=crt_chroma,
+                brightness=crt_brightness,
+            )
+            if crt
+            else None
+        )
+        rendered = _render_all(petscii, scale, border, settings)
         return io.NodeOutput(rendered, ui=ui.PreviewImage(rendered, cls=cls))
 
 

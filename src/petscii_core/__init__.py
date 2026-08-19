@@ -26,6 +26,7 @@ from .engine import (
     vote_background,
 )
 from .render import add_border, render_frame, render_frames, scanline_overlay
+from .crt import CrtSettings, apply_crt
 from .petv import encode_petv, read_petv, write_petv
 from .compare import compare_frames
 from .data_loader import (
@@ -57,6 +58,8 @@ __all__ = [
     "render_frames",
     "add_border",
     "scanline_overlay",
+    "CrtSettings",
+    "apply_crt",
     "encode_petv",
     "read_petv",
     "write_petv",

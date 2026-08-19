@@ -28,11 +28,25 @@ Then restart ComfyUI. The nodes appear under `image/petscii`.
 |---|---|---|
 | **PETSCII Convert** | IMAGE → IMAGE, PETSCII | Every engine knob as a widget. A batch is converted as independent stills. |
 | **PETSCII Video Convert** | IMAGE batch → IMAGE, PETSCII | Temporal hysteresis across the batch, background voted once then locked. |
-| **PETSCII Render** | PETSCII → IMAGE | Integer scale, optional scanlines and border. Re-render without reconverting. |
+| **PETSCII Render** | PETSCII → IMAGE | Integer scale, border, and the CRT treatment. Re-render without reconverting. |
 | **PETSCII Save .petv** | PETSCII → path | Writes the cell stream (core-spec §8.1). |
 
 `PETSCII` is a custom datatype carrying the cells themselves, so `Render` and
 `Save .petv` never pay for the conversion twice.
+
+### The CRT
+
+![CRT treatment](docs/media/comfy-crt.png)
+
+Tick `crt` on the Render node for scanlines, an aperture grille, barrel
+distortion, phosphor glow, vignette and chroma bleed — the same treatment, in the
+same order and with the same constants, as the live app's post shader, so a still
+from here and a frame from there look like the same monitor.
+
+Every effect size is expressed in *native* screen pixels and scaled by the render
+scale, so the look holds at 1x and at 8x rather than shrinking as you render
+larger. Scanlines need `scale` of 3 or more to have room to show. Setting every
+intensity to zero is a true bypass — the image is returned untouched.
 
 ### The two knobs that matter most
 
