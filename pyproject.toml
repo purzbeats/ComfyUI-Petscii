@@ -9,7 +9,7 @@ description = "Convert images and video to C64 PETSCII — optimal glyph and col
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
-authors = [{ name = "purz", email = "purz@comfy.org" }]
+authors = [{ name = "Purz", email = "purzbeats@gmail.com" }]
 keywords = ["comfyui", "petscii", "c64", "commodore", "pixel-art", "dithering"]
 classifiers = [
   "Programming Language :: Python :: 3",
