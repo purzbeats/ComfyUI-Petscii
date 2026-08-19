@@ -1,0 +1,10 @@
+# Kept in the repository, left out of the registry package.
+#
+# The fixtures and tests are how this pack proves its parity with the reference
+# implementation — they belong in git, and anyone can clone and run them. But
+# they are two thirds of the download for someone who just wants the nodes, and
+# installing from the registry does not run them.
+fixtures/
+tests/
+docs/
+core-spec.md
