@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "comfyui-petscii"
+version = "0.1.0"
+description = "Convert images and video to C64 PETSCII — optimal glyph and colour matching in Oklab, with temporal hysteresis"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "purz", email = "purz@comfy.org" }]
+keywords = ["comfyui", "petscii", "c64", "commodore", "pixel-art", "dithering"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Topic :: Multimedia :: Graphics",
+  "Topic :: Artistic Software",
+]
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pillow>=10"]
+
+[project.urls]
+Repository = "https://github.com/purzbeats/ComfyUI-Petscii"
+Documentation = "https://github.com/purzbeats/ComfyUI-Petscii#readme"
+
+[tool.comfy]
+PublisherId = "purz"
+DisplayName = "ComfyUI-PETSCII"
+Icon = ""
+includes = []
+
+[tool.hatch.build.targets.wheel]
+# The JSON under src/petscii_core/data is inside the package, so it ships without
+# a force-include; adding one duplicates every file and fails the build.
+packages = ["src/petscii_core"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+filterwarnings = ["error::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"

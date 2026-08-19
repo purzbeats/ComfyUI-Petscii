@@ -1,0 +1,113 @@
+# ComfyUI-PETSCII
+
+Convert images and video to C64 PETSCII inside ComfyUI. Optimal glyph and colour
+matching in Oklab, with temporal hysteresis so video does not boil frame to frame.
+
+![PETSCII from a ComfyUI workflow](docs/media/comfy-still.png)
+
+Every cell picks the screen code and foreground colour that minimise squared Oklab
+error against the source, over all 256 codes and 16 colours, with the background
+chosen by a full 16-candidate search. Output is C64-true: real screen codes, 1000
+cells, one global background.
+
+## Install
+
+Drop the folder into `ComfyUI/custom_nodes/`, or install from the registry. The only
+dependency is numpy.
+
+```sh
+cd ComfyUI/custom_nodes
+git clone https://github.com/purzbeats/ComfyUI-Petscii
+```
+
+Then restart ComfyUI. The nodes appear under `image/petscii`.
+
+## Nodes
+
+| Node | In → Out | |
+|---|---|---|
+| **PETSCII Convert** | IMAGE → IMAGE, PETSCII | Every engine knob as a widget. A batch is converted as independent stills. |
+| **PETSCII Video Convert** | IMAGE batch → IMAGE, PETSCII | Temporal hysteresis across the batch, background voted once then locked. |
+| **PETSCII Render** | PETSCII → IMAGE | Integer scale, optional scanlines and border. Re-render without reconverting. |
+| **PETSCII Save .petv** | PETSCII → path | Writes the cell stream (core-spec §8.1). |
+
+`PETSCII` is a custom datatype carrying the cells themselves, so `Render` and
+`Save .petv` never pay for the conversion twice.
+
+### The two knobs that matter most
+
+**`subset`** restricts the glyph vocabulary and is the biggest stylistic lever —
+`blocks` gives a chunky mosaic, `dither` an even tonal ramp, `lines` a wireframe,
+`text` renders the whole image in letterforms.
+
+**`eps`** (Video Convert) is the temporal hysteresis threshold. A cell keeps its
+previous choice unless a new one is better by more than `eps × 64`, which is what
+stops the picture boiling frame to frame. `0` disables it; `0.002`–`0.008` is the
+useful range.
+
+## Example workflows
+
+Both are in `workflows/` and both were executed end to end against a live
+ComfyUI 0.33.0:
+
+- **`image-to-petscii.json`** — Load Image → Convert → Render → Save Image.
+- **`batch-to-petv.json`** — two Load Images → Batch Images → Video Convert →
+  Save `.petv` + Save Image.
+
+`example_inputs/` holds the two images the first workflow expects; copy them into
+`ComfyUI/input/`. In real use you would feed Video Convert the frames of an actual
+clip, or the output of a sampler.
+
+## `.petv`
+
+The interchange format (core-spec §8.1): keyframes and deltas, true screen codes,
+one global background. The VJ app plays back what these nodes write, and the
+deferred C64 and Looking Glass exporters will read the same files.
+
+Interop is not assumed — `fixtures/interop.petv` was written by the independent
+TypeScript implementation and is read back byte-for-byte by
+`tests/test_interop.py`, which is what proves the two agree on the format rather
+than merely on the prose describing it.
+
+## Development
+
+```sh
+uv venv && uv pip install -e ".[dev]"
+pytest -q
+```
+
+The engine (`src/petscii_core/`) imports neither ComfyUI nor torch, which is why
+the whole test suite runs anywhere. `src/nodes.py` is the only file that touches
+tensors, and it does nothing but convert at the boundary.
+
+`shared/` is the single source of truth for the palette, charset and subsets;
+`sync_shared.py` mirrors it into the package so it ships in the wheel, and
+`tests/test_data.py` fails if the two drift.
+
+### Parity
+
+The normative algorithm is [`core-spec.md`](core-spec.md). This port must reproduce the fixtures
+frozen by the reference implementation, judged by the §7 comparator:
+
+```
+gradient  1000/1000 pixel-identical (100.00%; 941 exact, 59 same-render), 0 divergent
+photo     1000/1000 pixel-identical (100.00%; 974 exact, 26 same-render), 0 divergent
+portrait  1000/1000 pixel-identical (100.00%; 988 exact, 12 same-render), 0 divergent
+noise     1000/1000 pixel-identical (100.00%; 1000 exact, 0 same-render), 0 divergent
+ui         999/1000 pixel-identical ( 99.90%; 706 exact, 293 same-render), 0 divergent
+```
+
+"Same-render" is not a fudge. Wherever a cell's foreground equals the background,
+every glyph paints solid background, so which one the argmin lands on is decided by
+float noise and means nothing — the `ui` fixture is 30% such cells. What the
+comparator holds the ports to is the picture.
+
+`fixtures/` holds five 320x200 inputs and their frozen expected output. If parity
+ever breaks, fix the spec first, then the engine, then regenerate the fixtures —
+never adjust a fixture to match a change in behaviour.
+
+## Credits
+
+Charset rasterized from **Pet Me 64** by [Kreative
+Software](https://www.kreativekorp.com/software/fonts/c64/). Palette is Pepto's.
+Oklab is Björn Ottosson's. No Commodore ROM data ships here.

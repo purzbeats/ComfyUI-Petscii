@@ -1,0 +1,22 @@
+{
+  "name": "Pepto",
+  "source": "core-spec.md §2",
+  "colors": [
+    { "index": 0, "name": "black", "hex": "#000000", "rgb": [0, 0, 0] },
+    { "index": 1, "name": "white", "hex": "#FFFFFF", "rgb": [255, 255, 255] },
+    { "index": 2, "name": "red", "hex": "#68372B", "rgb": [104, 55, 43] },
+    { "index": 3, "name": "cyan", "hex": "#70A4B2", "rgb": [112, 164, 178] },
+    { "index": 4, "name": "purple", "hex": "#6F3D86", "rgb": [111, 61, 134] },
+    { "index": 5, "name": "green", "hex": "#588D43", "rgb": [88, 141, 67] },
+    { "index": 6, "name": "blue", "hex": "#352879", "rgb": [53, 40, 121] },
+    { "index": 7, "name": "yellow", "hex": "#B8C76F", "rgb": [184, 199, 111] },
+    { "index": 8, "name": "orange", "hex": "#6F4F25", "rgb": [111, 79, 37] },
+    { "index": 9, "name": "brown", "hex": "#433900", "rgb": [67, 57, 0] },
+    { "index": 10, "name": "light red", "hex": "#9A6759", "rgb": [154, 103, 89] },
+    { "index": 11, "name": "dark grey", "hex": "#444444", "rgb": [68, 68, 68] },
+    { "index": 12, "name": "grey", "hex": "#6C6C6C", "rgb": [108, 108, 108] },
+    { "index": 13, "name": "light green", "hex": "#9AD284", "rgb": [154, 210, 132] },
+    { "index": 14, "name": "light blue", "hex": "#6C5EB5", "rgb": [108, 94, 181] },
+    { "index": 15, "name": "light grey", "hex": "#959595", "rgb": [149, 149, 149] }
+  ]
+}
