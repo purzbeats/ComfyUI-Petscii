@@ -178,6 +178,68 @@ def _paint(frame: PetsciiFrame, scale: int, border: int, crt: CrtSettings | None
     return image
 
 
+def _memory_ceiling() -> tuple[int, str] | None:
+    """
+    A byte budget for the output batch, and the word for what it measures.
+
+    Free memory is the number worth checking against, but only Linux reports it
+    through `sysconf`: macOS has `SC_PHYS_PAGES` and no `SC_AVPHYS_PAGES`, and
+    Windows has no `sysconf` at all. So this falls back to installed memory,
+    which is a weaker bound but still a real one — a batch larger than the
+    machine's RAM is never going to work, whatever else is running.
+
+    Deliberately dependency-free. `psutil` would answer this everywhere, and
+    taking a dependency to improve an error message is a bad trade for a pack
+    whose entire install is numpy. Where nothing can be read, the allocation goes
+    ahead and :func:`_allocate_batch` catches the failure instead.
+    """
+    try:
+        page = os.sysconf("SC_PAGE_SIZE")
+    except (AttributeError, ValueError, OSError):
+        return None
+
+    for name, kind in (("SC_AVPHYS_PAGES", "free"), ("SC_PHYS_PAGES", "installed")):
+        try:
+            pages = os.sysconf(name)
+        except (AttributeError, ValueError, OSError):
+            continue
+        if pages > 0:
+            return page * pages, kind
+    return None
+
+
+def _allocate_batch(count: int, height: int, width: int, scale: int) -> torch.Tensor:
+    """
+    The output IMAGE batch, or an error that says what to change.
+
+    An IMAGE output is one contiguous float32 tensor — four bytes per channel per
+    pixel per frame, and no node can hand back less than that. It grows with the
+    square of the scale: a thousand frames is 0.8 GB at 1x and 49 GB at 8x. The
+    failure was a bare allocation error thrown after the first frame had already
+    been painted, which says nothing about which of the two knobs to reach for.
+
+    Checked ahead of time against :func:`_memory_ceiling`, and caught either way.
+    The up-front check is doing nearly all the work: both Linux overcommit and
+    macOS's lazy mapping hand back a 46 GiB tensor on a 16 GiB machine without
+    complaint, and only fail later, somewhere with no idea what to suggest.
+    """
+    needed = count * height * width * 3 * 4
+    advice = (
+        f"{count} frames at {width}x{height} (render scale {scale}) needs "
+        f"{needed / 1024**3:.1f} GiB as one IMAGE batch. Lower the render scale — it costs "
+        f"memory as the square — or send fewer frames at a time. To keep the cells without "
+        f"paying for pixels, save the PETSCII output as .petv and render it in passes."
+    )
+
+    ceiling = _memory_ceiling()
+    if ceiling is not None and needed > ceiling[0]:
+        raise MemoryError(f"{advice} This machine has {ceiling[0] / 1024**3:.1f} GiB {ceiling[1]}.")
+    try:
+        return torch.empty((count, height, width, 3), dtype=torch.float32)
+    except (MemoryError, RuntimeError) as exc:
+        raise MemoryError(advice) from exc
+
+
 def _store(out: torch.Tensor, index: int, painted: np.ndarray) -> None:
     """One painted frame into its slice of the output batch, as float 0..1."""
     out[index] = torch.from_numpy(painted).to(torch.float32).div_(255.0)
@@ -228,7 +290,7 @@ async def _render_all(
     count = len(data.frames)
     first = _paint(data.frames[0], scale, border, crt)
     height, width = first.shape[:2]
-    out = torch.empty((count, height, width, 3), dtype=torch.float32)
+    out = _allocate_batch(count, height, width, scale)
     _store(out, 0, first)
     del first
     if report:

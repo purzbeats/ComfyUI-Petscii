@@ -222,6 +222,62 @@ def test_render_all_matches_frame_by_frame_painting() -> None:
         assert np.array_equal(np.rint(out[index].numpy() * 255.0).astype(np.uint8), expected)
 
 
+# ------------------------------------------------------------ memory guard
+
+
+def test_allocate_batch_returns_the_right_tensor() -> None:
+    out = nodes._allocate_batch(3, 8, 10, scale=1)
+    assert out.shape == (3, 8, 10, 3)
+    assert out.dtype == torch.float32
+
+
+def test_allocate_batch_refuses_what_will_not_fit(monkeypatch) -> None:
+    """A batch bigger than free memory fails with the two knobs that fix it."""
+    monkeypatch.setattr(nodes, "_memory_ceiling", lambda: (1024**3, "free"))
+
+    with pytest.raises(MemoryError) as excinfo:
+        nodes._allocate_batch(1000, 1600, 2560, scale=8)
+
+    message = str(excinfo.value)
+    assert "render scale" in message
+    assert "fewer frames" in message
+    assert "GiB" in message
+
+
+def test_allocate_batch_proceeds_when_memory_is_unknown(monkeypatch) -> None:
+    """No sysconf — Windows — must not become a refusal to render."""
+    monkeypatch.setattr(nodes, "_memory_ceiling", lambda: None)
+    assert nodes._allocate_batch(2, 8, 10, scale=1).shape == (2, 8, 10, 3)
+
+
+def test_allocate_batch_translates_an_allocation_failure(monkeypatch) -> None:
+    """Overcommit means the up-front check can pass and the allocation still fail."""
+    monkeypatch.setattr(nodes, "_memory_ceiling", lambda: None)
+
+    def refuse(*args, **kwargs):
+        raise RuntimeError("[enforce fail at alloc_cpu.cpp:117]")
+
+    monkeypatch.setattr(nodes.torch, "empty", refuse)
+    with pytest.raises(MemoryError, match="render scale"):
+        nodes._allocate_batch(4, 8, 10, scale=1)
+
+
+def test_memory_ceiling_is_a_size_and_a_kind_or_none() -> None:
+    """
+    Whatever this platform reports has to be usable, not merely present.
+
+    Linux answers "free", macOS only "installed", Windows neither — and the
+    macOS case is the one that regressed once already, by asking for
+    SC_AVPHYS_PAGES alone and silently getting nothing back.
+    """
+    ceiling = nodes._memory_ceiling()
+    if ceiling is None:
+        return
+    size, kind = ceiling
+    assert size > 0
+    assert kind in {"free", "installed"}
+
+
 # --------------------------------------------------------- parallel painting
 
 
