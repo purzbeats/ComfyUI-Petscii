@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import typing
 from collections.abc import Sequence
 
@@ -17,6 +18,7 @@ from petscii_core import (
     Settings,
     convert,
     convert_batch,
+    convert_workers,
     frame_to_screen,
     iter_convert_batch,
     palette_rgb8,
@@ -477,3 +479,96 @@ class TestRender:
         flat = image.reshape(-1, 3)
         palette = palette_rgb8()
         assert np.isin(flat, palette).all()
+
+
+# ------------------------------------------------------- parallel conversion
+
+
+class TestParallelBatch:
+    """
+    The pool in `iter_convert_batch` must be invisible from the outside.
+
+    Every frame is converted independently and every intermediate is allocated
+    per call, so the only ways threading could show up are a shared buffer or a
+    reordered yield. Both would be intermittent in the wild, which is why these
+    check equality over a batch rather than sampling.
+    """
+
+    @staticmethod
+    def batch(count: int = 9) -> list[np.ndarray]:
+        rng = np.random.default_rng(3)
+        return [(rng.random((SCREEN_H, SCREEN_W, 3)) * 255).astype(np.uint8) for _ in range(count)]
+
+    def test_parallel_matches_serial(self) -> None:
+        images = self.batch()
+        serial = convert_batch(images, Settings(), workers=1)
+        parallel = convert_batch(images, Settings(), workers=4)
+
+        assert len(serial) == len(parallel)
+        for one, other in zip(serial, parallel, strict=True):
+            assert np.array_equal(one.screen, other.screen)
+            assert np.array_equal(one.color, other.color)
+            assert (one.bg, one.border) == (other.bg, other.border)
+
+    def test_frames_come_back_in_order(self) -> None:
+        # Distinct flat colours: the converted screen of each is unmistakable,
+        # so an out-of-order yield cannot pass by coincidence.
+        images = [np.full((SCREEN_H, SCREEN_W, 3), v * 24, dtype=np.uint8) for v in range(8)]
+        parallel = convert_batch(images, Settings(), workers=4)
+        serial = convert_batch(images, Settings(), workers=1)
+        assert [f.bg for f in parallel] == [f.bg for f in serial]
+
+    def test_temporal_ignores_workers(self) -> None:
+        """Hysteresis is a real dependency between frames — it may not be split."""
+        images = self.batch(6)
+        asked_for_threads = convert_batch(images, Settings(eps=0.02), temporal=True, workers=8)
+        sequential = convert_batch(images, Settings(eps=0.02), temporal=True, workers=1)
+
+        for one, other in zip(asked_for_threads, sequential, strict=True):
+            assert np.array_equal(one.screen, other.screen)
+            assert np.array_equal(one.color, other.color)
+
+    def test_each_image_is_read_exactly_once(self) -> None:
+        """
+        The lazy-sequence contract holds on the pool too.
+
+        `_TensorFrames` decodes on `__getitem__`, so an extra read is an extra
+        tensor conversion — and the whole reason the engine indexes rather than
+        iterates is that nothing should materialise a clip twice.
+        """
+        images = self.batch(7)
+
+        class CountingSequence(Sequence):
+            def __init__(self, items):
+                self._items = items
+                self.reads = []
+
+            def __len__(self):
+                return len(self._items)
+
+            def __getitem__(self, index):
+                self.reads.append(index)
+                return self._items[index]
+
+        lazy = CountingSequence(images)
+        convert_batch(lazy, Settings(), workers=4)
+        assert sorted(lazy.reads) == list(range(7))
+
+    def test_abandoning_the_generator_shuts_the_pool_down(self) -> None:
+        """A caller that stops early — an interrupt — must not leave threads running."""
+        images = self.batch(24)
+        stream = iter_convert_batch(images, Settings(), workers=4)
+        assert next(stream) is not None
+        assert next(stream) is not None
+        stream.close()
+
+        remaining = [t for t in threading.enumerate() if t.name.startswith("petscii-convert")]
+        assert remaining == []
+
+    def test_worker_count_is_bounded(self) -> None:
+        assert convert_workers(1) == 1
+        assert convert_workers(2) <= 2
+        assert convert_workers(10_000) <= 8
+        # An explicit request wins, and never lands below one.
+        assert convert_workers(10_000, 3) == 3
+        assert convert_workers(10_000, 0) == 1

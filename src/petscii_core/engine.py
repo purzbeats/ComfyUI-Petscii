@@ -11,7 +11,10 @@ it is the right shape for the algorithm.
 
 from __future__ import annotations
 
+import os
+from collections import deque
 from collections.abc import Iterable, Iterator, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 
 import numpy as np
@@ -47,6 +50,7 @@ __all__ = [
     "cell_error_of",
     "convert",
     "convert_batch",
+    "convert_workers",
     "distance_tables",
     "frame_to_screen",
     "glyph_minima",
@@ -432,26 +436,55 @@ def convert(
     return _convert_oklab(oklab, settings, state)
 
 
+def convert_workers(count: int, requested: int | None = None) -> int:
+    """
+    How many threads :func:`iter_convert_batch` should convert on.
+
+    Conversion is dense float32 numpy — distance tables, an einsum, a pair of
+    argmins — and numpy drops the GIL for all of it, so threads scale where a
+    process pool would drown in pickling: the tables alone are 12 MB a frame.
+
+    Capped at eight. Past that the per-frame working set (a 4 MB ``D`` and an
+    8 MB ``A``, live at once, per thread) stops fitting anywhere useful and the
+    curve flattens.
+    """
+    if requested is not None:
+        return max(1, int(requested))
+    if count < 2:
+        return 1
+    return max(1, min(count, os.cpu_count() or 1, 8))
+
+
 def iter_convert_batch(
     images: Sequence[np.ndarray],
     settings: Settings | None = None,
     *,
     temporal: bool = False,
     bg_sample: int = 8,
+    workers: int | None = None,
 ) -> Iterator[PetsciiFrame]:
     """
     Converts a sequence of frames, yielding each as it is finished.
 
     With ``temporal=False`` each frame is independent — that is what a batch of
-    unrelated stills wants. With ``temporal=True`` hysteresis carries across the
-    batch in order and the background is voted once over evenly sampled frames
-    then locked, because a background that flickers mid-clip is far more visible
-    than one that is slightly wrong.
+    unrelated stills wants, and it is also what lets the batch be converted on a
+    pool. With ``temporal=True`` hysteresis carries across the batch in order and
+    the background is voted once over evenly sampled frames then locked, because
+    a background that flickers mid-clip is far more visible than one that is
+    slightly wrong; that ordering is a real dependency, so the temporal path
+    stays strictly sequential and ``workers`` is ignored for it.
 
     This is the generator form so a caller can report progress, allow itself to
     be interrupted, or release each source frame between conversions. ``images``
     is indexed rather than iterated, so a lazy sequence over a video buffer never
-    has to be materialised — see :func:`convert_batch` for the eager form.
+    has to be materialised — see :func:`convert_batch` for the eager form. On the
+    parallel path the indexing happens inside the worker, so a lazy sequence that
+    decodes on ``__getitem__`` gets that work spread across the pool too.
+
+    Frames are yielded in order either way. A caller writing into a preallocated
+    output could take them as they land, but every caller here also reports
+    progress, and progress that goes backwards is worse than the few milliseconds
+    in-order draining costs when all the frames are the same size.
     """
     settings = settings or Settings()
     count = len(images)
@@ -463,12 +496,46 @@ def iter_convert_batch(
         if locked is None:
             locked = vote_background(images, settings, sample=bg_sample)
         settings = replace(settings, bg_lock=locked)
-        state: HysteresisState | None = HysteresisState()
-    else:
-        state = None
+        state = HysteresisState()
+        for index in range(count):
+            yield convert(images[index], settings, state)
+        return
 
-    for index in range(count):
-        yield convert(images[index], settings, state)
+    threads = convert_workers(count, workers)
+    if threads == 1:
+        for index in range(count):
+            yield convert(images[index], settings, None)
+        return
+
+    # The first frame converts on this thread, which fills the charset, palette
+    # and subset caches before any worker can race to fill them. They are
+    # `lru_cache`d module-wide, so a race would only ever waste work rather than
+    # corrupt it — but it would also hand two threads two distinct arrays for
+    # the same data, and identical output is easier to guarantee than to debug.
+    yield convert(images[0], settings, None)
+    if count == 1:
+        return
+
+    window = threads * 2
+    pool = ThreadPoolExecutor(max_workers=threads, thread_name_prefix="petscii-convert")
+    queue: deque[Future] = deque()
+    submitted = 1
+    try:
+        while submitted < count and len(queue) < window:
+            queue.append(pool.submit(convert, images[submitted], settings, None))
+            submitted += 1
+        while queue:
+            frame = queue.popleft().result()
+            if submitted < count:
+                queue.append(pool.submit(convert, images[submitted], settings, None))
+                submitted += 1
+            yield frame
+    finally:
+        # Reached on the ordinary path and on a caller that abandons the
+        # generator part-way — closing a generator throws GeneratorExit in here,
+        # and without cancel_futures the shutdown would block converting frames
+        # nobody is going to read.
+        pool.shutdown(wait=True, cancel_futures=True)
 
 
 def convert_batch(
@@ -477,10 +544,15 @@ def convert_batch(
     *,
     temporal: bool = False,
     bg_sample: int = 8,
+    workers: int | None = None,
 ) -> list[PetsciiFrame]:
     """Eager :func:`iter_convert_batch` — the whole sequence as a list."""
     frames = images if isinstance(images, Sequence) else list(images)
-    return list(iter_convert_batch(frames, settings, temporal=temporal, bg_sample=bg_sample))
+    return list(
+        iter_convert_batch(
+            frames, settings, temporal=temporal, bg_sample=bg_sample, workers=workers
+        )
+    )
 
 
 def vote_background(
