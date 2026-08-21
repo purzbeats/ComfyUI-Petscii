@@ -222,6 +222,77 @@ def test_render_all_matches_frame_by_frame_painting() -> None:
         assert np.array_equal(np.rint(out[index].numpy() * 255.0).astype(np.uint8), expected)
 
 
+# --------------------------------------------------------- parallel painting
+
+
+def test_render_all_threaded_matches_serial(monkeypatch) -> None:
+    """
+    The pool must not change a single pixel.
+
+    Painting is per-frame and pure, so this is really a check that no thread is
+    sharing a buffer with another — the failure mode would be intermittent, and
+    an equality test over enough frames is what makes it deterministic.
+    """
+    frames = [frame(value=v, bg=v % 16, border=(v + 3) % 16) for v in range(9)]
+    data = PetsciiData(frames=frames, charset=0)
+
+    monkeypatch.setattr(nodes, "_paint_workers", lambda count: 1)
+    serial = run(nodes._render_all(data, scale=2, border=2, report=False))
+
+    monkeypatch.setattr(nodes, "_paint_workers", lambda count: 4)
+    threaded = run(nodes._render_all(data, scale=2, border=2, report=False))
+
+    assert torch.equal(serial, threaded)
+
+
+def test_render_all_threaded_reports_every_frame_in_order(progress) -> None:
+    data = PetsciiData(frames=[frame(value=v) for v in range(6)], charset=0)
+    run(nodes._render_all(data, scale=1, border=0, report=True))
+    assert progress == [(index + 1, 6) for index in range(6)]
+
+
+def test_paint_workers_stays_within_the_batch() -> None:
+    # One frame never pays for a pool, and a short batch never spins up more
+    # threads than it has work for.
+    assert nodes._paint_workers(1) == 1
+    assert nodes._paint_workers(2) <= 2
+    assert nodes._paint_workers(1000) <= 8
+
+
+def test_render_all_threaded_propagates_an_interrupt(monkeypatch) -> None:
+    """An interrupt must surface, not be swallowed by the pool's shutdown."""
+    calls = {"n": 0}
+
+    def interrupt_on_the_third_frame() -> None:
+        calls["n"] += 1
+        if calls["n"] >= 3:
+            raise KeyboardInterrupt("stopped")
+
+    monkeypatch.setattr(nodes, "_interrupted", interrupt_on_the_third_frame)
+    monkeypatch.setattr(nodes, "_paint_workers", lambda count: 4)
+    data = PetsciiData(frames=[frame(value=v) for v in range(40)], charset=0)
+
+    with pytest.raises(KeyboardInterrupt):
+        run(nodes._render_all(data, scale=1, border=0, report=False))
+
+
+def test_render_all_threaded_surfaces_a_painting_failure(monkeypatch) -> None:
+    """A frame that fails to paint must raise, not hang on the queue."""
+    real = nodes._paint
+
+    def fail_on_the_fifth(frame_, scale, border, crt):
+        if frame_.bg == 5:
+            raise ValueError("bad frame")
+        return real(frame_, scale, border, crt)
+
+    monkeypatch.setattr(nodes, "_paint", fail_on_the_fifth)
+    monkeypatch.setattr(nodes, "_paint_workers", lambda count: 4)
+    data = PetsciiData(frames=[frame(value=v, bg=v) for v in range(9)], charset=0)
+
+    with pytest.raises(ValueError, match="bad frame"):
+        run(nodes._render_all(data, scale=1, border=0, report=False))
+
+
 # ------------------------------------------------------------------ preview
 #
 # Asserting on a real `ui.PreviewImage` would mean letting it write the PNGs this
