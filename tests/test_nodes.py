@@ -883,23 +883,41 @@ def test_memory_ceiling_without_sysconf_is_unknown(monkeypatch) -> None:
     assert nodes._memory_ceiling() is None
 
 
+# These two stand in for platforms other than whichever one is running them, so
+# they install a `sysconf` outright rather than wrapping the real one —
+# `raising=False` because on Windows there is no attribute there to replace, and
+# a test about Windows must not be the one that cannot run on Windows.
+
+
 def test_memory_ceiling_ignores_names_this_platform_lacks(monkeypatch) -> None:
     """macOS has SC_PHYS_PAGES and not SC_AVPHYS_PAGES; both must be tried."""
-    real = nodes.os.sysconf
 
     def only_total(name):
-        if name == "SC_AVPHYS_PAGES":
-            raise ValueError("unrecognized configuration name")
-        return real(name)
+        if name == "SC_PAGE_SIZE":
+            return 4096
+        if name == "SC_PHYS_PAGES":
+            return 1024
+        raise ValueError("unrecognized configuration name")
 
-    monkeypatch.setattr(nodes.os, "sysconf", only_total)
-    ceiling = nodes._memory_ceiling()
-    assert ceiling is not None and ceiling[1] == "installed"
+    monkeypatch.setattr(nodes.os, "sysconf", only_total, raising=False)
+    assert nodes._memory_ceiling() == (4096 * 1024, "installed")
+
+
+def test_memory_ceiling_prefers_free_over_installed(monkeypatch) -> None:
+    """Linux reports both, and free is the number worth checking against."""
+
+    def both(name):
+        return {"SC_PAGE_SIZE": 4096, "SC_AVPHYS_PAGES": 100, "SC_PHYS_PAGES": 1024}[name]
+
+    monkeypatch.setattr(nodes.os, "sysconf", both, raising=False)
+    assert nodes._memory_ceiling() == (4096 * 100, "free")
 
 
 def test_memory_ceiling_rejects_a_nonsense_page_count(monkeypatch) -> None:
     """Some containers answer zero or -1 rather than failing."""
-    monkeypatch.setattr(nodes.os, "sysconf", lambda name: 4096 if name == "SC_PAGE_SIZE" else 0)
+    monkeypatch.setattr(
+        nodes.os, "sysconf", lambda name: 4096 if name == "SC_PAGE_SIZE" else 0, raising=False
+    )
     assert nodes._memory_ceiling() is None
 
 
