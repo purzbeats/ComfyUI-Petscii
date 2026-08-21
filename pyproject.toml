@@ -30,7 +30,7 @@ supported_accelerators = ["CPU", "CUDA", "ROCm", "Metal"]
 # torch is a *test* dependency only, for the node-boundary tests — the pack itself
 # needs nothing but numpy. tests/test_nodes.py skips cleanly without it, so the
 # parity suite still runs in an environment that would rather not install it.
-dev = ["pytest>=8", "pillow>=10", "torch>=2.0"]
+dev = ["pytest>=8", "pillow>=10", "torch>=2.0", "pytest-cov>=5"]
 
 [project.urls]
 Repository = "https://github.com/purzbeats/ComfyUI-Petscii"
@@ -55,6 +55,23 @@ testpaths = ["tests"]
 # the `src` package for its relative imports to resolve.
 pythonpath = ["src", "."]
 filterwarnings = ["error::DeprecationWarning"]
+
+# Coverage is a dev tool, not a gate you pay for on every local run — `pytest`
+# alone stays fast. CI adds `--cov`, and the threshold is 100 because that is
+# where the suite already is: the argument for a lower number is always that some
+# line is not worth testing, and the two that genuinely are not are marked.
+[tool.coverage.run]
+source = ["src"]
+branch = false
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+exclude_lines = [
+  "pragma: no cover",
+  # The engine's `if TYPE_CHECKING` blocks exist for the annotations alone.
+  "if TYPE_CHECKING:",
+]
 
 [tool.ruff]
 line-length = 110

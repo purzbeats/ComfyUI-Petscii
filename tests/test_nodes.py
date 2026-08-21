@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import pathlib
 import struct
+import types
 
 import numpy as np
 import pytest
@@ -811,3 +813,101 @@ def test_every_workflow_input_file_is_shipped() -> None:
             if entry["type"] == "LoadImage":
                 name = entry["widgets_values"][0]
                 assert name in available, f"{path.name} loads {name}, which is not in example_inputs/"
+
+
+# --------------------------------------------------- the rest of the surface
+
+
+def test_render_all_serial_path_still_reports(progress, monkeypatch) -> None:
+    """One worker is a real path — a single-core host takes it for every clip."""
+    monkeypatch.setattr(nodes, "_paint_workers", lambda count: 1)
+    data = PetsciiData(frames=[frame(value=v) for v in range(4)], charset=0)
+    run(nodes._render_all(data, scale=1, border=0, report=True))
+    assert progress == [(index + 1, 4) for index in range(4)]
+
+
+def test_dithering_a_sequence_warns_that_it_will_crawl(previews, caplog) -> None:
+    """§4.7 cannot be made temporally stable, and silence would look like it can."""
+    batch = torch.cat([image(seed=i) for i in range(2)])
+    with caplog.at_level(logging.WARNING):
+        run(PETSCIIConvert.execute(image=batch, dither=True, **_convert_kwargs()))
+    assert "cannot be made temporally stable" in caplog.text
+
+
+def test_dithering_a_single_still_says_nothing(previews, caplog) -> None:
+    with caplog.at_level(logging.WARNING):
+        run(PETSCIIConvert.execute(image=image(), dither=True, **_convert_kwargs()))
+    assert caplog.text == ""
+
+
+def test_render_warns_when_the_scale_cannot_show_scanlines(previews, caplog) -> None:
+    data = PetsciiData(frames=[frame()], charset=0)
+    with caplog.at_level(logging.WARNING):
+        run(PETSCIIRender.execute(petscii=data, **_render_kwargs(scale=2, crt=True)))
+    assert "no room for scanlines" in caplog.text
+
+
+def test_comfy_entrypoint_returns_the_extension() -> None:
+    extension = run(nodes.comfy_entrypoint())
+    assert isinstance(extension, nodes.PetsciiExtension)
+
+
+def test_stream_fps_falls_back_for_a_single_frame() -> None:
+    """One frame carries no gap, so there is no rate to derive — 30 is the default."""
+
+    one_frame = types.SimpleNamespace(frames=[types.SimpleNamespace(dt_ms=0)])
+    assert nodes._stream_fps(one_frame) == 30.0
+
+
+def test_load_petv_rejects_a_headerless_stream(tmp_path, monkeypatch) -> None:
+    """A valid header with no records is a file that parses to nothing."""
+    from petscii_core.petv import MAGIC
+
+    _fake_folder_paths(monkeypatch, tmp_path)
+    (tmp_path / "input" / "empty.petv").write_bytes(MAGIC + bytes([1, 0, 0, 0]))
+
+    with pytest.raises(ValueError, match="holds no frames"):
+        run(PETSCIILoadPETV.execute(petv="empty.petv", fps=0.0))
+
+
+def test_fingerprint_of_a_vanished_file_is_not_a_number(tmp_path, monkeypatch) -> None:
+    """NaN never equals itself, so a missing file always counts as changed."""
+    _fake_folder_paths(monkeypatch, tmp_path)
+    stamp = PETSCIILoadPETV.fingerprint_inputs(petv="gone.petv")
+    assert stamp != stamp
+
+
+def test_memory_ceiling_without_sysconf_is_unknown(monkeypatch) -> None:
+    """Windows: no sysconf at all, so nothing can be checked ahead of time."""
+    monkeypatch.delattr(nodes.os, "sysconf", raising=False)
+    assert nodes._memory_ceiling() is None
+
+
+def test_memory_ceiling_ignores_names_this_platform_lacks(monkeypatch) -> None:
+    """macOS has SC_PHYS_PAGES and not SC_AVPHYS_PAGES; both must be tried."""
+    real = nodes.os.sysconf
+
+    def only_total(name):
+        if name == "SC_AVPHYS_PAGES":
+            raise ValueError("unrecognized configuration name")
+        return real(name)
+
+    monkeypatch.setattr(nodes.os, "sysconf", only_total)
+    ceiling = nodes._memory_ceiling()
+    assert ceiling is not None and ceiling[1] == "installed"
+
+
+def test_memory_ceiling_rejects_a_nonsense_page_count(monkeypatch) -> None:
+    """Some containers answer zero or -1 rather than failing."""
+    monkeypatch.setattr(nodes.os, "sysconf", lambda name: 4096 if name == "SC_PAGE_SIZE" else 0)
+    assert nodes._memory_ceiling() is None
+
+
+def test_load_petv_accepts_a_file_that_is_there(tmp_path, monkeypatch) -> None:
+    """The three answers `validate_inputs` can give, and this is the yes."""
+    _fake_folder_paths(monkeypatch, tmp_path)
+    (tmp_path / "input" / "clip.petv").write_bytes(b"whatever")
+
+    assert PETSCIILoadPETV.validate_inputs(petv="clip.petv") is True
+    assert PETSCIILoadPETV.validate_inputs(petv="") != True  # noqa: E712
+    assert "not in the input directory" in PETSCIILoadPETV.validate_inputs(petv="absent.petv")

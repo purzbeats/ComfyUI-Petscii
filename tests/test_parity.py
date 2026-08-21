@@ -10,6 +10,7 @@ other way round.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -130,3 +131,33 @@ def test_frame_shape() -> None:
     assert frame.screen.shape == (CELLS,)
     assert frame.color.shape == (CELLS,)
     assert frame.color.max() < 16
+
+
+def _flat_source() -> tuple[np.ndarray, PetsciiFrame]:
+    """A converted screen and the Oklab buffer the comparator has to be given."""
+    image = np.full((SCREEN_H, SCREEN_W, 3), 60, dtype=np.uint8)
+    settings = Settings()
+    oklab = pre_adjust_to_oklab(frame_to_screen(image), settings)
+    return oklab, convert(image, settings)
+
+
+def test_comparison_needs_a_matching_charset() -> None:
+    """
+    §7 compares choices under one charset; across two it is meaningless.
+
+    The comparator recomputes cell errors from the glyph masks, and the masks
+    are what the charset selects — so a mismatched pair would not fail, it would
+    quietly score one port's frame against the other port's font.
+    """
+    oklab, frame = _flat_source()
+    other = replace(frame.copy(), charset=1)
+
+    with pytest.raises(ValueError, match="different charsets"):
+        compare_frames(oklab, frame, other)
+
+
+def test_identical_fraction_is_the_share_of_the_screen() -> None:
+    oklab, frame = _flat_source()
+    result = compare_frames(oklab, frame, frame.copy())
+    assert result.identical == CELLS
+    assert result.identical_fraction == 1.0
