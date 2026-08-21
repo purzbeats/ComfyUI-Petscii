@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from petscii_core import CrtSettings, apply_crt, render_frame
+from petscii_core import CrtSettings, apply_crt, crt, render_frame
 from petscii_core.engine import SCREEN_H, SCREEN_W, Settings, convert
 
 FLAT = CrtSettings(scanlines=0, curvature=0, glow=0, vignette=0, chroma=0, brightness=1.0)
@@ -127,3 +127,79 @@ def test_is_deterministic() -> None:
     a = apply_crt(image, CrtSettings(), 4)
     b = apply_crt(image, CrtSettings(), 4)
     assert np.array_equal(a, b)
+
+
+def _sample_by_fancy_index(image: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """
+    The bilinear sampler written the obvious way, kept as the parity reference.
+
+    `crt._sample` gathers with `np.take` over a flat view because it is three
+    times faster. Speed is only allowed to touch this code if it changes nothing
+    (core-spec §7), and "nothing" has to be checked against something — this is
+    that something, and it is deliberately the slow, transparently-correct form.
+    """
+    height, width = image.shape[:2]
+    x = np.clip(u, 0.0, 1.0) * (width - 1)
+    y = np.clip(v, 0.0, 1.0) * (height - 1)
+
+    x0 = np.floor(x).astype(np.int32)
+    y0 = np.floor(y).astype(np.int32)
+    x1 = np.minimum(x0 + 1, width - 1)
+    y1 = np.minimum(y0 + 1, height - 1)
+    fx = (x - x0)[..., None].astype(np.float32)
+    fy = (y - y0)[..., None].astype(np.float32)
+
+    return (
+        image[y0, x0] * (1 - fx) * (1 - fy)
+        + image[y0, x1] * fx * (1 - fy)
+        + image[y1, x0] * (1 - fx) * fy
+        + image[y1, x1] * fx * fy
+    ).astype(np.float32)
+
+
+class TestGatherIsBitIdentical:
+    """The `np.take` gather against the fancy-indexed form it replaced."""
+
+    @pytest.mark.parametrize("scale", [1, 2, 4])
+    def test_whole_treatment_matches_the_reference_sampler(
+        self, scale: int, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        image = checkerboard(scale)
+        fast = apply_crt(image, CrtSettings(), scale)
+
+        monkeypatch.setattr(crt, "_sample", _sample_by_fancy_index)
+        slow = apply_crt(image, CrtSettings(), scale)
+
+        assert np.array_equal(fast, slow)
+
+    @pytest.mark.parametrize(
+        "effect",
+        [
+            {"curvature": 0.35},
+            {"chroma": 0.3},
+            {"glow": 0.5},
+        ],
+    )
+    def test_each_sampling_effect_matches(
+        self, effect: dict, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Only three of the six effects sample at all; the others are per-pixel
+        # multiplies that never reach the gather.
+        image = checkerboard(4)
+        settings = only(**effect)
+        fast = apply_crt(image, settings, 4)
+
+        monkeypatch.setattr(crt, "_sample", _sample_by_fancy_index)
+        slow = apply_crt(image, settings, 4)
+
+        assert np.array_equal(fast, slow)
+
+    def test_sampler_matches_off_the_edge(self) -> None:
+        # Curvature pushes coordinates past 0 and 1, where the clamp decides the
+        # result — the case a flat-index rewrite is most likely to get wrong.
+        rng = np.random.default_rng(11)
+        image = rng.random((37, 53, 3)).astype(np.float32)
+        u = rng.uniform(-0.5, 1.5, size=(37, 53)).astype(np.float32)
+        v = rng.uniform(-0.5, 1.5, size=(37, 53)).astype(np.float32)
+
+        assert np.array_equal(crt._sample(image, u, v), _sample_by_fancy_index(image, u, v))

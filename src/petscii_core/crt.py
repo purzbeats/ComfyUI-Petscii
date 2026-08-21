@@ -56,6 +56,14 @@ def _sample(image: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
 
     The shader gets this from the sampler; here it is explicit, and it is what
     makes the barrel distortion smooth rather than stair-stepped.
+
+    The four corners are gathered with :func:`np.take` over a flat view rather
+    than as ``image[y0, x0]``. Two-dimensional fancy indexing walks its index
+    arrays as a pair and re-derives the offset for every element; ``take`` over
+    ``(H*W, 3)`` gets one precomputed offset array and copies rows. It is the
+    same four corners blended in the same order — bit-identical, and roughly
+    three times faster, which matters because ``apply_crt`` calls this seven
+    times per frame and the gather is almost the whole cost of the treatment.
     """
     height, width = image.shape[:2]
     x = np.clip(u, 0.0, 1.0) * (width - 1)
@@ -68,11 +76,17 @@ def _sample(image: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
     fx = (x - x0)[..., None].astype(np.float32)
     fy = (y - y0)[..., None].astype(np.float32)
 
+    # int64 rows: the product overflows int32 above ~2 gigapixels, and the
+    # addition below would wrap silently rather than raise.
+    flat = image.reshape(-1, image.shape[2])
+    row0 = y0.astype(np.int64) * width
+    row1 = y1.astype(np.int64) * width
+
     return (
-        image[y0, x0] * (1 - fx) * (1 - fy)
-        + image[y0, x1] * fx * (1 - fy)
-        + image[y1, x0] * (1 - fx) * fy
-        + image[y1, x1] * fx * fy
+        np.take(flat, row0 + x0, axis=0) * (1 - fx) * (1 - fy)
+        + np.take(flat, row0 + x1, axis=0) * fx * (1 - fy)
+        + np.take(flat, row1 + x0, axis=0) * (1 - fx) * fy
+        + np.take(flat, row1 + x1, axis=0) * fx * fy
     ).astype(np.float32)
 
 
