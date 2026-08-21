@@ -10,15 +10,14 @@ other way round.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 from petscii_core import PetsciiFrame, Settings, compare_frames, convert, pre_adjust_to_oklab
+from petscii_core.engine import CELLS, SCREEN_H, SCREEN_W, frame_to_screen
 
 from .paths import fixtures_dir
-from petscii_core.engine import CELLS, SCREEN_H, SCREEN_W, frame_to_screen
 
 FIXTURES = fixtures_dir()
 NAMES = ["gradient", "photo", "portrait", "noise", "ui"]
@@ -87,7 +86,9 @@ def test_comparator_rejects_a_different_background() -> None:
     image = load_fixture("photo")
     frame = convert(image, REFERENCE)
     oklab = pre_adjust_to_oklab(frame_to_screen(image), REFERENCE)
-    wrong = PetsciiFrame(frame.screen.copy(), frame.color.copy(), (frame.bg + 1) % 16, frame.border, frame.charset)
+    wrong = PetsciiFrame(
+        frame.screen.copy(), frame.color.copy(), (frame.bg + 1) % 16, frame.border, frame.charset
+    )
     result = compare_frames(oklab, frame, wrong)
     assert not result.bg_matches
     assert not result.passed

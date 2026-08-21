@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "comfyui-petscii"
-version = "0.2.0"
+version = "0.3.0"
 description = "Convert images and video to C64 PETSCII — optimal glyph and colour matching in Oklab, with temporal hysteresis"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,8 +18,19 @@ classifiers = [
 ]
 dependencies = ["numpy>=1.24"]
 
+# Pure numpy on the CPU, so it runs wherever ComfyUI does. Listing every
+# accelerator is what stops the registry advertising a GPU requirement this pack
+# does not have. No `supported_comfyui_version` floor: the v3 node API is the real
+# requirement and pinning a version number nobody has verified would lock out
+# installs that work fine.
+supported_os = ["Windows", "Linux", "macOS"]
+supported_accelerators = ["CPU", "CUDA", "ROCm", "Metal"]
+
 [project.optional-dependencies]
-dev = ["pytest>=8", "pillow>=10"]
+# torch is a *test* dependency only, for the node-boundary tests — the pack itself
+# needs nothing but numpy. tests/test_nodes.py skips cleanly without it, so the
+# parity suite still runs in an environment that would rather not install it.
+dev = ["pytest>=8", "pillow>=10", "torch>=2.0"]
 
 [project.urls]
 Repository = "https://github.com/purzbeats/ComfyUI-Petscii"
@@ -29,6 +40,8 @@ Documentation = "https://github.com/purzbeats/ComfyUI-Petscii#readme"
 PublisherId = "purz"
 DisplayName = "ComfyUI-PETSCII"
 Icon = ""
+banner_url = "https://raw.githubusercontent.com/purzbeats/ComfyUI-Petscii/main/docs/media/comfy-crt.png"
+web = "web"
 includes = []
 
 [tool.hatch.build.targets.wheel]
@@ -38,9 +51,31 @@ packages = ["src/petscii_core"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+# The repo root as well as src/: `src.nodes` has to be importable as part of
+# the `src` package for its relative imports to resolve.
+pythonpath = ["src", "."]
 filterwarnings = ["error::DeprecationWarning"]
 
 [tool.ruff]
 line-length = 110
 target-version = "py310"
+
+# Pinned explicitly: with no `select`, the rule set is whatever the installed ruff
+# defaults to that month, so the same code lints clean on one machine and not the
+# next. ruff is not a dev dependency — run it with `uvx ruff check .`.
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "RUF"]
+ignore = [
+  # The engine is a port of a spec written in maths; `d`, `s`, `a`, `k` are the
+  # spec's own names and renaming them would make the code harder to check.
+  "E741",
+  # `int(round(x))` is redundant on a Python float and load-bearing on a numpy
+  # scalar. Every site is in the framing and timing arithmetic, where the explicit
+  # cast is documentation and dropping it buys nothing.
+  "RUF046",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests reach into the node layer's privates on purpose, and conftest builds a
+# module stub, which is exactly the dynamic-attribute case B010 exists to flag.
+"tests/*" = ["B010"]

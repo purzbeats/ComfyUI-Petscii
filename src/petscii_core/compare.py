@@ -114,10 +114,12 @@ def compare_frames(
         d, s = distance_tables(oklab)
         a = masked_sums(d, expected.charset)
         err_expected = cell_error_of(
-            a, s, unresolved, expected.screen[unresolved].astype(np.int64), expected.color[unresolved], expected.bg
+            a, s, unresolved,
+            expected.screen[unresolved].astype(np.int64), expected.color[unresolved], expected.bg,
         )
         err_actual = cell_error_of(
-            a, s, unresolved, actual.screen[unresolved].astype(np.int64), actual.color[unresolved], expected.bg
+            a, s, unresolved,
+            actual.screen[unresolved].astype(np.int64), actual.color[unresolved], expected.bg,
         )
         scale = np.maximum(np.abs(err_expected), np.abs(err_actual))
         scale = np.where(scale > 0, scale, np.finfo(np.float32).tiny)

@@ -1,19 +1,19 @@
 {
   "id": "00000000-0000-0000-0000-000000000000",
   "revision": 0,
-  "last_node_id": 4,
-  "last_link_id": 3,
+  "last_node_id": 5,
+  "last_link_id": 4,
   "nodes": [
     {
       "id": 1,
-      "type": "LoadImage",
+      "type": "PETSCIILoadPETV",
       "pos": [
         40,
         120
       ],
       "size": [
         330,
-        146
+        106
       ],
       "flags": {},
       "order": 0,
@@ -21,94 +21,77 @@
       "inputs": [],
       "outputs": [
         {
-          "name": "IMAGE",
-          "type": "IMAGE",
+          "name": "petscii",
+          "type": "PETSCII",
           "links": [
             1
           ],
           "slot_index": 0
         },
         {
-          "name": "MASK",
-          "type": "MASK",
+          "name": "frame_count",
+          "type": "INT",
           "links": [],
           "slot_index": 1
         }
       ],
       "properties": {
-        "Node name for S&R": "LoadImage",
-        "cnr_id": "comfy-core"
+        "Node name for S&R": "PETSCIILoadPETV"
       },
       "widgets_values": [
-        "petscii_photo.png"
+        "clip.petv",
+        0.0
       ]
     },
     {
       "id": 2,
-      "type": "PETSCIIConvert",
+      "type": "PETSCIISetBorder",
       "pos": [
-        430,
+        420,
         120
       ],
       "size": [
         330,
-        406
+        82
       ],
       "flags": {},
       "order": 1,
       "mode": 0,
       "inputs": [
         {
-          "name": "image",
-          "type": "IMAGE",
+          "name": "petscii",
+          "type": "PETSCII",
           "link": 1
         }
       ],
       "outputs": [
         {
-          "name": "image",
-          "type": "IMAGE",
-          "links": [],
-          "slot_index": 0
-        },
-        {
           "name": "petscii",
           "type": "PETSCII",
           "links": [
-            2
+            2,
+            4
           ],
-          "slot_index": 1
+          "slot_index": 0
         }
       ],
       "properties": {
-        "Node name for S&R": "PETSCIIConvert",
-        "cnr_id": "comfyui-petscii"
+        "Node name for S&R": "PETSCIISetBorder"
       },
       "widgets_values": [
-        "0 \u2014 upper/graphics",
-        "all",
-        "auto",
-        "bg",
-        "cover",
-        0.0,
-        1.15,
-        1.0,
-        1.25,
-        false,
-        1,
-        8
+        "14 \u2014 light blue"
       ]
     },
     {
       "id": 3,
       "type": "PETSCIIRender",
       "pos": [
-        860,
+        800,
         120
       ],
       "size": [
         330,
-        340
+        358
       ],
       "flags": {},
       "order": 2,
@@ -131,12 +114,11 @@
         }
       ],
       "properties": {
-        "Node name for S&R": "PETSCIIRender",
-        "cnr_id": "comfyui-petscii"
+        "Node name for S&R": "PETSCIIRender"
       },
       "widgets_values": [
-        3,
-        12,
+        4,
+        8,
         true,
         0.45,
         0.35,
@@ -151,12 +133,12 @@
       "id": 4,
       "type": "SaveImage",
       "pos": [
-        1240,
+        1180,
         120
       ],
       "size": [
         330,
-        146
+        300
       ],
       "flags": {},
       "order": 3,
@@ -168,20 +150,49 @@
           "link": 3
         }
       ],
-      "outputs": [
-        {
-          "name": "images",
-          "type": "IMAGE",
-          "links": [],
-          "slot_index": 0
-        }
-      ],
+      "outputs": [],
       "properties": {
         "Node name for S&R": "SaveImage",
         "cnr_id": "comfy-core"
       },
       "widgets_values": [
-        "petscii/still"
+        "petscii/from-petv"
+      ]
+    },
+    {
+      "id": 5,
+      "type": "PETSCIIInfo",
+      "pos": [
+        420,
+        260
+      ],
+      "size": [
+        330,
+        130
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "petscii",
+          "type": "PETSCII",
+          "link": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "info",
+          "type": "STRING",
+          "links": [],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PETSCIIInfo"
+      },
+      "widgets_values": [
+        8
       ]
     }
   ],
@@ -192,12 +203,12 @@
       0,
       2,
       0,
-      "IMAGE"
+      "PETSCII"
     ],
     [
       2,
       2,
-      1,
+      0,
       3,
       0,
       "PETSCII"
@@ -209,6 +220,14 @@
       4,
       0,
       "IMAGE"
+    ],
+    [
+      4,
+      2,
+      0,
+      5,
+      0,
+      "PETSCII"
     ]
   ],
   "groups": [],

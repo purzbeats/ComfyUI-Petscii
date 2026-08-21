@@ -11,6 +11,17 @@ from petscii_core.engine import SCREEN_H, SCREEN_W, Settings, convert
 FLAT = CrtSettings(scanlines=0, curvature=0, glow=0, vignette=0, chroma=0, brightness=1.0)
 
 
+def only(**effect) -> CrtSettings:
+    """
+    One effect on, everything else off.
+
+    Each test isolates a single part of the treatment, and spelling out the five
+    zeroes every time buried which one was actually under test.
+    """
+    off = {"scanlines": 0.0, "curvature": 0.0, "glow": 0.0, "vignette": 0.0, "chroma": 0.0}
+    return CrtSettings(**{**off, "brightness": 1.0, **effect})
+
+
 def checkerboard(scale: int = 4) -> np.ndarray:
     """A rendered PETSCII screen, which is what the CRT is designed to receive."""
     rng = np.random.default_rng(7)
@@ -27,7 +38,7 @@ class TestBypass:
         assert FLAT.is_identity
         assert not CrtSettings().is_identity
         # Brightness alone is enough to make it do something.
-        assert not CrtSettings(scanlines=0, curvature=0, glow=0, vignette=0, chroma=0, brightness=1.2).is_identity
+        assert not only(brightness=1.2).is_identity
 
 
 class TestShapeAndRange:
@@ -49,7 +60,7 @@ class TestShapeAndRange:
 class TestEffects:
     def test_scanlines_darken_alternate_rows(self) -> None:
         image = np.full((64, 96, 3), 200, dtype=np.uint8)
-        out = apply_crt(image, CrtSettings(scanlines=0.8, curvature=0, glow=0, vignette=0, chroma=0, brightness=1.0), 4)
+        out = apply_crt(image, only(scanlines=0.8), 4)
         # Row means must vary: that variation *is* the scanline.
         row_means = out.reshape(64, -1).mean(axis=1)
         assert row_means.max() - row_means.min() > 20
@@ -76,7 +87,7 @@ class TestEffects:
 
     def test_vignette_darkens_the_corners_not_the_centre(self) -> None:
         image = np.full((128, 128, 3), 200, dtype=np.uint8)
-        out = apply_crt(image, CrtSettings(scanlines=0, curvature=0, glow=0, vignette=1.0, chroma=0, brightness=1.0), 4)
+        out = apply_crt(image, only(vignette=1.0), 4)
         centre = out[60:68, 60:68].mean()
         corner = out[:8, :8].mean()
         assert corner < centre * 0.75
@@ -84,14 +95,14 @@ class TestEffects:
     def test_curvature_blanks_the_corners(self) -> None:
         """The curve pushes the corners off the tube; that area reads as glass."""
         image = np.full((128, 128, 3), 220, dtype=np.uint8)
-        out = apply_crt(image, CrtSettings(scanlines=0, curvature=1.0, glow=0, vignette=0, chroma=0, brightness=1.0), 4)
+        out = apply_crt(image, only(curvature=1.0), 4)
         assert out[0, 0].max() == 0
         assert out[64, 64].min() > 100
 
     def test_chroma_separates_red_and_blue_at_an_edge(self) -> None:
         image = np.zeros((64, 96, 3), dtype=np.uint8)
         image[:, 48:] = 255  # a hard white edge down the middle
-        out = apply_crt(image, CrtSettings(scanlines=0, curvature=0, glow=0, vignette=0, chroma=1.0, brightness=1.0), 4)
+        out = apply_crt(image, only(chroma=1.0), 4)
         # Red and blue are shifted in opposite directions, so they no longer agree
         # in the column either side of the edge.
         assert not np.array_equal(out[:, 44:52, 0], out[:, 44:52, 2])

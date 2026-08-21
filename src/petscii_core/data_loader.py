@@ -7,7 +7,7 @@ if it drifts from the repo copy.
 from __future__ import annotations
 
 import json
-from functools import lru_cache
+from functools import cache, lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +23,7 @@ CELL = 8
 CELL_PIXELS = CELL * CELL
 
 
-@lru_cache(maxsize=None)
+@cache
 def _load(name: str) -> Any:
     with (DATA_DIR / name).open(encoding="utf-8") as fh:
         return json.load(fh)
@@ -80,7 +80,7 @@ def subset_names() -> tuple[str, ...]:
     return tuple(_load("subsets.json")["subsets"].keys())
 
 
-@lru_cache(maxsize=None)
+@cache
 def subset_mask(name: str) -> np.ndarray:
     """
     The 256-entry boolean mask for a named subset (core-spec §6). Falls back to

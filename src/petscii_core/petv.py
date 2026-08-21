@@ -9,8 +9,9 @@ Glass exporters.
 from __future__ import annotations
 
 import struct
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import BinaryIO, Iterable, Sequence
+from typing import BinaryIO
 
 import numpy as np
 
@@ -28,14 +29,14 @@ _FRAME_HEAD = struct.Struct("<BHBB")
 _DELTA_COUNT = struct.Struct("<H")
 
 __all__ = [
+    "DELTA_LIMIT",
     "MAGIC",
     "VERSION",
-    "DELTA_LIMIT",
     "PetvFrame",
     "PetvStream",
-    "write_petv",
-    "read_petv",
     "encode_petv",
+    "read_petv",
+    "write_petv",
 ]
 
 
@@ -81,6 +82,13 @@ def encode_petv(
 
     Realtime recording is variable-rate by nature, but a rendered clip has one
     known interval, so this takes ``fps`` rather than timestamps.
+
+    ``dt_ms`` is a whole number of milliseconds, and most frame rates do not land
+    on one — 30 fps is 33.333 ms. Rounding the interval once and repeating it
+    loses a third of a millisecond per frame, which is a full second of drift
+    every fifty seconds of playback. So the gaps are the *differences between
+    rounded timestamps* rather than a rounded difference: 30 fps emits 33, 33, 34
+    and stays within half a millisecond of true time no matter how long the clip.
     """
     if not frames:
         raise ValueError("cannot encode an empty .petv")
@@ -88,16 +96,17 @@ def encode_petv(
         raise ValueError(f"fps must be positive, got {fps}")
 
     resolved_charset = frames[0].charset if charset is None else charset
-    dt = int(round(1000.0 / fps))
-    if dt > 0xFFFF:
+    if int(round(1000.0 / fps)) > 0xFFFF:
         raise ValueError(f"fps {fps} gives a frame interval past the 65535 ms field")
 
     out = bytearray(_HEADER.pack(MAGIC, VERSION, resolved_charset & 0xFF, flags & 0xFF, 0))
     previous: PetsciiFrame | None = None
+    elapsed = 0
 
     for index, frame in enumerate(frames):
         _validate(frame)
-        gap = 0 if index == 0 else dt
+        stamp = int(round(index * 1000.0 / fps))
+        gap, elapsed = stamp - elapsed, stamp
         changed = _changed_cells(previous, frame)
         if changed is None or len(changed) > DELTA_LIMIT:
             out += _pack_keyframe(frame, gap)

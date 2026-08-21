@@ -107,4 +107,4 @@ def _diffuse(oklab: np.ndarray, cx: int, cy: int, delta: np.ndarray) -> None:
     np.clip(view + delta, OKLAB_MIN, OKLAB_MAX, out=view)
 
 
-__all__ = ["convert_oklab_dithered", "NEIGHBOURS"]
+__all__ = ["NEIGHBOURS", "convert_oklab_dithered"]

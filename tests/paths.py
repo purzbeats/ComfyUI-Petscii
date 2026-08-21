@@ -39,3 +39,8 @@ def shared_dir() -> Path:
 def core_spec() -> Path:
     """The normative algorithm document."""
     return _find_upward(marker="core-spec.md")
+
+
+def workflows_dir() -> Path:
+    """The bundled example workflows."""
+    return _find_upward(marker="workflows")

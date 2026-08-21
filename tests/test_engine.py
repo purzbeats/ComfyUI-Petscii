@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import typing
+from collections.abc import Sequence
+
 import numpy as np
 import pytest
 
 from petscii_core import (
     CELLS,
+    COLS,
     SCREEN_H,
     SCREEN_W,
     HysteresisState,
@@ -14,12 +18,14 @@ from petscii_core import (
     convert,
     convert_batch,
     frame_to_screen,
+    iter_convert_batch,
     palette_rgb8,
     pre_adjust_to_oklab,
     render_frame,
 )
 from petscii_core.data_loader import charset_bytes, glyph_masks, subset_mask
 from petscii_core.engine import (
+    _adds_letterbox,
     argmin_for_background,
     cell_error_of,
     distance_tables,
@@ -54,7 +60,7 @@ def noise(seed: int, height: int = SCREEN_H, width: int = SCREEN_W) -> np.ndarra
 
 class TestOklab:
     #: Ottosson's published reference values, for linear-RGB inputs.
-    REFERENCE_VALUES = [
+    REFERENCE_VALUES: typing.ClassVar = [
         ((1.0, 1.0, 1.0), (1.0, 0.0, 0.0)),
         ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0)),
         ((1.0, 0.0, 0.0), (0.6279554, 0.2248631, 0.1258463)),
@@ -272,6 +278,38 @@ class TestBatch:
     def test_empty_batch(self) -> None:
         assert convert_batch([], REFERENCE) == []
 
+    def test_iter_form_yields_the_same_frames(self) -> None:
+        """The generator is what the nodes drive; the list form must not diverge."""
+        frames = [noise(60), noise(61), noise(62)]
+        for settings, temporal in ((REFERENCE, False), (Settings(eps=0.002), True)):
+            streamed = list(iter_convert_batch(frames, settings, temporal=temporal))
+            eager = convert_batch(frames, settings, temporal=temporal)
+            assert len(streamed) == len(eager)
+            for a, b in zip(streamed, eager, strict=True):
+                assert np.array_equal(a.screen, b.screen)
+                assert np.array_equal(a.color, b.color)
+                assert (a.bg, a.border) == (b.bg, b.border)
+
+    def test_iter_form_is_lazy(self) -> None:
+        """Nothing is converted until the caller asks for a frame."""
+        touched: list[int] = []
+
+        class Watched(Sequence):
+            def __init__(self, frames):
+                self._frames = frames
+
+            def __len__(self):
+                return len(self._frames)
+
+            def __getitem__(self, index):
+                touched.append(index)
+                return self._frames[index]
+
+        stream = iter_convert_batch(Watched([noise(70), noise(71)]), REFERENCE)
+        assert touched == []
+        next(stream)
+        assert touched == [0]
+
 
 # ------------------------------------------------------------- framing (§5)
 
@@ -299,6 +337,36 @@ class TestFraming:
         # stays centred.
         assert out[10, 10, 0] > 150
         assert out[10, -10, 2] > 150
+
+    def test_contain_bars_take_the_chosen_background(self) -> None:
+        """
+        The bars are part of the image the background is chosen from, so painting
+        them black regardless would show black bars around a picture whose
+        background is something else entirely.
+        """
+        wide = np.zeros((200, 400, 3), dtype=np.uint8)
+        wide[:, :] = (60, 60, 200)  # strongly blue, so black is not the winner
+        out = convert(wide, Settings(framing="contain"))
+        assert out.bg != 0
+        # Every cell in the letterboxed strip paints nothing but the background.
+        top_row_cells = out.screen[:COLS]
+        assert np.all(out.color[:COLS] == out.bg) or np.all(top_row_cells == top_row_cells[0])
+
+    def test_contain_bars_follow_an_explicit_background(self) -> None:
+        wide = np.full((200, 400, 3), 180, dtype=np.uint8)
+        out = convert(wide, Settings(framing="contain", bg_lock=11))
+        assert out.bg == 11
+
+    def test_cover_never_pays_for_the_letterbox_probe(self) -> None:
+        """
+        The second pass exists only for ``contain`` with an auto background; the
+        fixtures and every ``cover`` input must take the single-pass path.
+        """
+        wide = np.zeros((200, 400, 3), dtype=np.uint8)
+        assert not _adds_letterbox(wide, Settings(framing="cover"))
+        assert not _adds_letterbox(wide, Settings(framing="contain", bg_lock=3))
+        assert not _adds_letterbox(noise(80), Settings(framing="contain"))
+        assert _adds_letterbox(wide, Settings(framing="contain"))
 
     def test_contain_letterboxes(self) -> None:
         wide = np.full((200, 400, 3), 180, dtype=np.uint8)

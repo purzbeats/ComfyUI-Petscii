@@ -40,7 +40,7 @@
         "cnr_id": "comfy-core"
       },
       "widgets_values": [
-        "example.png"
+        "petscii_photo.png"
       ]
     },
     {
@@ -79,7 +79,7 @@
         "cnr_id": "comfy-core"
       },
       "widgets_values": [
-        "example.png"
+        "petscii_portrait.png"
       ]
     },
     {
@@ -180,7 +180,8 @@
         1.0,
         4,
         12.0,
-        2
+        2,
+        8
       ]
     },
     {

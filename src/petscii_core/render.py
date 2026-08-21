@@ -13,7 +13,7 @@ import numpy as np
 from .data_loader import CELL, CELL_PIXELS, charset_bytes, palette_rgb8
 from .engine import COLS, ROWS, SCREEN_H, SCREEN_W, PetsciiFrame
 
-__all__ = ["render_frame", "render_frames", "add_border", "scanline_overlay"]
+__all__ = ["add_border", "render_frame", "render_frames", "scanline_overlay"]
 
 
 def render_frame(frame: PetsciiFrame, scale: int = 1) -> np.ndarray:

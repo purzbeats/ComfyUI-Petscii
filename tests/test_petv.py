@@ -58,7 +58,7 @@ def test_delta_sequence_round_trips_cell_for_cell() -> None:
     sequence = [base, nudge(base, 10), nudge(base, 40), nudge(base, 3)]
     stream = read_petv(encode_petv(sequence, fps=60))
     assert [f.keyframe for f in stream.frames] == [True, False, False, False]
-    for expected, got in zip(sequence, stream.frames):
+    for expected, got in zip(sequence, stream.frames, strict=True):
         assert np.array_equal(got.screen, expected.screen)
         assert np.array_equal(got.color, expected.color)
 
@@ -96,7 +96,7 @@ def test_deltas_are_much_smaller_than_keyframes() -> None:
 def test_frames_from_stream_are_renderable() -> None:
     a = frame(23, bg=4, border=12)
     stream = read_petv(encode_petv([a], fps=30))
-    back = list(frames_from_stream(stream))[0]
+    back = next(iter(frames_from_stream(stream)))
     assert back.bg == 4
     assert back.border == 12
     assert back.charset == 0
@@ -113,7 +113,7 @@ def test_write_to_disk(tmp_path) -> None:
 
 class TestRejection:
     def test_not_a_petv(self) -> None:
-        with pytest.raises(ValueError, match="not a .petv"):
+        with pytest.raises(ValueError, match=r"not a \.petv"):
             read_petv(b"\x01\x02\x03")
 
     def test_unsupported_version(self) -> None:
@@ -168,5 +168,27 @@ def test_byte_layout_matches_the_spec() -> None:
     assert (kind, dt, bg, border) == (0x02, 20, 5, 7)  # 50 fps -> 20 ms
     (count,) = struct.unpack_from("<H", data, offset + 5)
     assert count == 2
-    index, char, color = struct.unpack_from("<HBB", data, offset + 7)
+    index, _char, _color = struct.unpack_from("<HBB", data, offset + 7)
     assert index == 0
+
+
+def test_fractional_frame_rates_do_not_drift() -> None:
+    """
+    A whole-millisecond ``dt`` cannot represent 30 fps, and rounding the interval
+    once and repeating it loses a third of a millisecond every frame — a second of
+    drift per fifty seconds of playback. The gaps must be differences of rounded
+    timestamps instead, so the error stays bounded however long the clip runs.
+    """
+    base = frame(11)
+    sequence = [base] + [nudge(base, 5) for _ in range(299)]
+
+    for fps in (30.0, 23.976, 59.94, 25.0, 24.0):
+        stream = read_petv(encode_petv(sequence, fps=fps))
+        ideal = (len(sequence) - 1) * 1000.0 / fps
+        assert abs(stream.duration_ms - ideal) <= 1.0, f"{fps} fps drifted"
+
+
+def test_thirty_fps_alternates_the_gap() -> None:
+    base = frame(12)
+    stream = read_petv(encode_petv([base] + [nudge(base, 3) for _ in range(6)], fps=30))
+    assert [f.dt_ms for f in stream.frames] == [0, 33, 34, 33, 33, 34, 33]

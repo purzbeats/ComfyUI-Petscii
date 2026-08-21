@@ -11,8 +11,8 @@ it is the right shape for the algorithm.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Iterable, Sequence
 
 import numpy as np
 
@@ -36,23 +36,24 @@ SCREEN_W = COLS * CELL
 SCREEN_H = ROWS * CELL
 
 __all__ = [
+    "CELLS",
     "COLS",
     "ROWS",
-    "CELLS",
-    "SCREEN_W",
     "SCREEN_H",
-    "Settings",
+    "SCREEN_W",
     "PetsciiFrame",
+    "Settings",
+    "argmin_for_background",
+    "cell_error_of",
     "convert",
     "convert_batch",
-    "frame_to_screen",
-    "pre_adjust_to_oklab",
     "distance_tables",
-    "masked_sums",
+    "frame_to_screen",
     "glyph_minima",
-    "argmin_for_background",
+    "iter_convert_batch",
+    "masked_sums",
+    "pre_adjust_to_oklab",
     "select_background",
-    "cell_error_of",
 ]
 
 
@@ -96,7 +97,7 @@ class PetsciiFrame:
         """``(screen, color)`` reshaped to ``(25, 40)``."""
         return self.screen.reshape(ROWS, COLS), self.color.reshape(ROWS, COLS)
 
-    def copy(self) -> "PetsciiFrame":
+    def copy(self) -> PetsciiFrame:
         return replace(self, screen=self.screen.copy(), color=self.color.copy())
 
 
@@ -218,10 +219,28 @@ def _cells_from_image(oklab: np.ndarray) -> np.ndarray:
 
 
 def distance_tables(oklab: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """``D (1000, 64, 16)`` and ``S (1000, 16)`` of core-spec §4.1."""
+    """
+    ``D (1000, 64, 16)`` and ``S (1000, 16)`` of core-spec §4.1.
+
+    The obvious spelling — broadcast every cell pixel against every palette entry,
+    then contract — allocates a ``(1000, 64, 16, 3)`` float32 intermediate, 12 MB
+    that has to be written and read back before a single distance exists. Walking
+    the 16 palette entries instead keeps each intermediate at ``(1000, 64, 3)``,
+    small enough to stay in cache, and more than halves the cost of the whole
+    conversion. The arithmetic is unchanged, term for term and in the same order,
+    so the result is bit-identical to the broadcast form — which is the only way
+    a speedup is allowed to touch this function (core-spec §7).
+
+    The expanded form ``|x|² - 2x·p + |p|²`` would be a further 8x as one GEMM,
+    and is deliberately not used: it cancels catastrophically as the distance
+    approaches zero, which is exactly where §4.4's ties are decided.
+    """
     cells = _cells_from_image(oklab)
-    delta = cells[:, :, None, :] - palette_oklab()[None, None, :, :]
-    d = np.einsum("cpkx,cpkx->cpk", delta, delta, dtype=np.float32)
+    palette = palette_oklab()
+    d = np.empty((CELLS, CELL_PIXELS, PALETTE_SIZE), dtype=np.float32)
+    for k in range(PALETTE_SIZE):
+        delta = cells - palette[k]
+        d[:, :, k] = (delta * delta).sum(axis=2, dtype=np.float32)
     return d, d.sum(axis=1, dtype=np.float32)
 
 
@@ -402,6 +421,8 @@ def convert(
     ``settings.dither``.
     """
     settings = settings or Settings()
+    if _adds_letterbox(image, settings):
+        settings = replace(settings, bg_lock=_letterbox_background(image, settings))
     framed = frame_to_screen(image, settings.framing, _letterbox_rgb(settings))
     oklab = pre_adjust_to_oklab(framed, settings)
     if settings.dither:
@@ -411,6 +432,45 @@ def convert(
     return _convert_oklab(oklab, settings, state)
 
 
+def iter_convert_batch(
+    images: Sequence[np.ndarray],
+    settings: Settings | None = None,
+    *,
+    temporal: bool = False,
+    bg_sample: int = 8,
+) -> Iterator[PetsciiFrame]:
+    """
+    Converts a sequence of frames, yielding each as it is finished.
+
+    With ``temporal=False`` each frame is independent — that is what a batch of
+    unrelated stills wants. With ``temporal=True`` hysteresis carries across the
+    batch in order and the background is voted once over evenly sampled frames
+    then locked, because a background that flickers mid-clip is far more visible
+    than one that is slightly wrong.
+
+    This is the generator form so a caller can report progress, allow itself to
+    be interrupted, or release each source frame between conversions. ``images``
+    is indexed rather than iterated, so a lazy sequence over a video buffer never
+    has to be materialised — see :func:`convert_batch` for the eager form.
+    """
+    settings = settings or Settings()
+    count = len(images)
+    if count == 0:
+        return
+
+    if temporal:
+        locked = settings.bg_lock
+        if locked is None:
+            locked = vote_background(images, settings, sample=bg_sample)
+        settings = replace(settings, bg_lock=locked)
+        state: HysteresisState | None = HysteresisState()
+    else:
+        state = None
+
+    for index in range(count):
+        yield convert(images[index], settings, state)
+
+
 def convert_batch(
     images: Iterable[np.ndarray],
     settings: Settings | None = None,
@@ -418,30 +478,9 @@ def convert_batch(
     temporal: bool = False,
     bg_sample: int = 8,
 ) -> list[PetsciiFrame]:
-    """
-    Converts a sequence of frames.
-
-    With ``temporal=False`` each frame is independent — that is what a batch of
-    unrelated stills wants. With ``temporal=True`` hysteresis carries across the
-    batch in order and the background is voted once over evenly sampled frames
-    then locked, because a background that flickers mid-clip is far more visible
-    than one that is slightly wrong.
-    """
-    settings = settings or Settings()
-    frames = list(images)
-    if not frames:
-        return []
-
-    if not temporal:
-        return [convert(frame, settings) for frame in frames]
-
-    locked = settings.bg_lock
-    if locked is None:
-        locked = vote_background(frames, settings, sample=bg_sample)
-    voted = replace(settings, bg_lock=locked)
-
-    state = HysteresisState()
-    return [convert(frame, voted, state) for frame in frames]
+    """Eager :func:`iter_convert_batch` — the whole sequence as a list."""
+    frames = images if isinstance(images, Sequence) else list(images)
+    return list(iter_convert_batch(frames, settings, temporal=temporal, bg_sample=bg_sample))
 
 
 def vote_background(
@@ -472,6 +511,43 @@ def vote_background(
 def _letterbox_rgb(settings: Settings) -> tuple[int, int, int]:
     index = 0 if settings.bg_lock is None else int(settings.bg_lock) & 15
     return tuple(int(v) for v in palette_rgb8()[index])  # type: ignore[return-value]
+
+
+def _adds_letterbox(image: np.ndarray, settings: Settings) -> bool:
+    """
+    Whether ``contain`` framing will actually paint bars for this input.
+
+    Only ``contain`` letterboxes, only a mismatched aspect produces bars, and a
+    320 x 200 input short-circuits framing entirely (§5) — so the common cases,
+    including every parity fixture, answer False and never pay for :func:`convert`'s
+    second pass.
+    """
+    if settings.framing != "contain" or settings.bg_lock is not None:
+        return False
+    height, width = np.asarray(image).shape[:2]
+    if (width, height) == (SCREEN_W, SCREEN_H):
+        return False
+    return abs(width / height - SCREEN_W / SCREEN_H) > 1e-9
+
+
+def _letterbox_background(image: np.ndarray, settings: Settings) -> int:
+    """
+    The background to paint ``contain``'s bars in, for an auto background.
+
+    Bar colour and background selection are circular: §4.5 picks the background
+    from the framed image, but the bars are part of that image and have to be
+    painted in *some* colour first. Resolving it takes one probe conversion over
+    black bars to learn the background, which the real pass then both paints the
+    bars in and locks. One round is enough — a second could only differ if the
+    bars outvoted the picture, and bars that dominate the frame are already the
+    degenerate case.
+    """
+    probe = frame_to_screen(image, settings.framing, _letterbox_rgb(settings))
+    oklab = pre_adjust_to_oklab(probe, settings)
+    d, s = distance_tables(oklab)
+    a = masked_sums(d, settings.charset)
+    chosen, _ = select_background(a, s, glyph_minima(a, s), settings.subset_array())
+    return chosen
 
 
 def charset_row_bytes(charset: int) -> np.ndarray:

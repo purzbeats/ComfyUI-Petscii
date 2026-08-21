@@ -13,7 +13,6 @@ and expect this test to fail until both sides agree again.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -49,7 +48,7 @@ def test_frame_count(stream, expected: dict) -> None:
 
 
 def test_every_cell_survives_the_round_trip(stream, expected: dict) -> None:
-    for index, (got, want) in enumerate(zip(stream.frames, expected["frames"])):
+    for index, (got, want) in enumerate(zip(stream.frames, expected["frames"], strict=True)):
         assert got.bg == want["bg"], f"frame {index} background"
         assert got.border == want["border"], f"frame {index} border"
         assert np.array_equal(got.screen, np.array(want["screen"], dtype=np.uint8)), f"frame {index} screen"
@@ -100,7 +99,7 @@ def test_python_writer_reproduces_the_same_bytes(stream, expected: dict) -> None
     assert len(ours) == len(theirs), "record layout differs in size"
     ours_stream = read_petv(ours)
     assert [f.keyframe for f in ours_stream.frames] == [f.keyframe for f in stream.frames]
-    for a, b in zip(ours_stream.frames, stream.frames):
+    for a, b in zip(ours_stream.frames, stream.frames, strict=True):
         assert np.array_equal(a.screen, b.screen)
         assert np.array_equal(a.color, b.color)
         assert (a.bg, a.border) == (b.bg, b.border)

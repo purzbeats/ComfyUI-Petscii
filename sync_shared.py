@@ -8,8 +8,8 @@ outside its package. `tests/test_data.py` fails if the two drift, so a forgotten
 sync is a red test rather than a silent parity break.
 """
 
-from pathlib import Path
 import shutil
+from pathlib import Path
 
 FILES = ("palette.json", "charset.json", "subsets.json")
 ROOT = Path(__file__).resolve().parent

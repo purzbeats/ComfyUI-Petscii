@@ -8,13 +8,13 @@ from __future__ import annotations
 import numpy as np
 
 __all__ = [
-    "srgb_to_linear",
-    "linear_to_srgb",
-    "linear_rgb_to_oklab",
-    "oklab_to_linear_rgb",
-    "srgb_to_oklab",
-    "OKLAB_MIN",
     "OKLAB_MAX",
+    "OKLAB_MIN",
+    "linear_rgb_to_oklab",
+    "linear_to_srgb",
+    "oklab_to_linear_rgb",
+    "srgb_to_linear",
+    "srgb_to_oklab",
 ]
 
 # Ottosson's matrices, core-spec §3.
