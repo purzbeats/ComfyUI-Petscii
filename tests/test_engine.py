@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import typing
 from collections.abc import Sequence
 
@@ -11,29 +12,39 @@ import pytest
 from petscii_core import (
     CELLS,
     COLS,
+    ROWS,
     SCREEN_H,
     SCREEN_W,
     HysteresisState,
+    PetsciiFrame,
     Settings,
+    add_border,
     convert,
     convert_batch,
+    convert_workers,
     frame_to_screen,
     iter_convert_batch,
     palette_rgb8,
     pre_adjust_to_oklab,
     render_frame,
+    render_frames,
+    scanline_overlay,
 )
 from petscii_core.data_loader import charset_bytes, glyph_masks, subset_mask
 from petscii_core.engine import (
     _adds_letterbox,
     argmin_for_background,
     cell_error_of,
+    charset_row_bytes,
     distance_tables,
     glyph_minima,
     masked_sums,
     select_background,
 )
 from petscii_core.oklab import (
+    OKLAB_MAX,
+    OKLAB_MIN,
+    clamp_oklab,
     linear_rgb_to_oklab,
     linear_to_srgb,
     oklab_to_linear_rgb,
@@ -477,3 +488,259 @@ class TestRender:
         flat = image.reshape(-1, 3)
         palette = palette_rgb8()
         assert np.isin(flat, palette).all()
+
+
+# ------------------------------------------------------- parallel conversion
+
+
+class TestParallelBatch:
+    """
+    The pool in `iter_convert_batch` must be invisible from the outside.
+
+    Every frame is converted independently and every intermediate is allocated
+    per call, so the only ways threading could show up are a shared buffer or a
+    reordered yield. Both would be intermittent in the wild, which is why these
+    check equality over a batch rather than sampling.
+    """
+
+    @staticmethod
+    def batch(count: int = 9) -> list[np.ndarray]:
+        rng = np.random.default_rng(3)
+        return [(rng.random((SCREEN_H, SCREEN_W, 3)) * 255).astype(np.uint8) for _ in range(count)]
+
+    def test_parallel_matches_serial(self) -> None:
+        images = self.batch()
+        serial = convert_batch(images, Settings(), workers=1)
+        parallel = convert_batch(images, Settings(), workers=4)
+
+        assert len(serial) == len(parallel)
+        for one, other in zip(serial, parallel, strict=True):
+            assert np.array_equal(one.screen, other.screen)
+            assert np.array_equal(one.color, other.color)
+            assert (one.bg, one.border) == (other.bg, other.border)
+
+    def test_frames_come_back_in_order(self) -> None:
+        # Distinct flat colours: the converted screen of each is unmistakable,
+        # so an out-of-order yield cannot pass by coincidence.
+        images = [np.full((SCREEN_H, SCREEN_W, 3), v * 24, dtype=np.uint8) for v in range(8)]
+        parallel = convert_batch(images, Settings(), workers=4)
+        serial = convert_batch(images, Settings(), workers=1)
+        assert [f.bg for f in parallel] == [f.bg for f in serial]
+
+    def test_temporal_ignores_workers(self) -> None:
+        """Hysteresis is a real dependency between frames — it may not be split."""
+        images = self.batch(6)
+        asked_for_threads = convert_batch(images, Settings(eps=0.02), temporal=True, workers=8)
+        sequential = convert_batch(images, Settings(eps=0.02), temporal=True, workers=1)
+
+        for one, other in zip(asked_for_threads, sequential, strict=True):
+            assert np.array_equal(one.screen, other.screen)
+            assert np.array_equal(one.color, other.color)
+
+    def test_each_image_is_read_exactly_once(self) -> None:
+        """
+        The lazy-sequence contract holds on the pool too.
+
+        `_TensorFrames` decodes on `__getitem__`, so an extra read is an extra
+        tensor conversion — and the whole reason the engine indexes rather than
+        iterates is that nothing should materialise a clip twice.
+        """
+        images = self.batch(7)
+
+        class CountingSequence(Sequence):
+            def __init__(self, items):
+                self._items = items
+                self.reads = []
+
+            def __len__(self):
+                return len(self._items)
+
+            def __getitem__(self, index):
+                self.reads.append(index)
+                return self._items[index]
+
+        lazy = CountingSequence(images)
+        convert_batch(lazy, Settings(), workers=4)
+        assert sorted(lazy.reads) == list(range(7))
+
+    def test_abandoning_the_generator_shuts_the_pool_down(self) -> None:
+        """A caller that stops early — an interrupt — must not leave threads running."""
+        images = self.batch(24)
+        stream = iter_convert_batch(images, Settings(), workers=4)
+        assert next(stream) is not None
+        assert next(stream) is not None
+        stream.close()
+
+        remaining = [t for t in threading.enumerate() if t.name.startswith("petscii-convert")]
+        assert remaining == []
+
+    def test_worker_count_is_bounded(self) -> None:
+        assert convert_workers(1) == 1
+        assert convert_workers(2) <= 2
+        assert convert_workers(10_000) <= 8
+        # An explicit request wins, and never lands below one.
+        assert convert_workers(10_000, 3) == 3
+        assert convert_workers(10_000, 0) == 1
+
+
+def test_glyph_minima_matches_a_separate_min_and_argmin() -> None:
+    """
+    `_min_and_argmin` takes the value at the index rather than reducing twice.
+
+    That is the same element by definition, so this is really a guard on the
+    shapes and the axis — get either wrong and the values still look plausible
+    while belonging to the wrong glyph.
+    """
+    rng = np.random.default_rng(19)
+    a = rng.random((40, 128, 16)).astype(np.float32)
+    s = rng.random((40, 16)).astype(np.float32)
+
+    min_normal, fg_normal, min_inverse, fg_inverse = glyph_minima(a, s)
+    inverse = s[:, None, :] - a
+
+    assert np.array_equal(min_normal, a.min(axis=2))
+    assert np.array_equal(fg_normal, a.argmin(axis=2).astype(np.uint8))
+    assert np.array_equal(min_inverse, inverse.min(axis=2))
+    assert np.array_equal(fg_inverse, inverse.argmin(axis=2).astype(np.uint8))
+
+
+# --------------------------------------------------------- renderer surface
+#
+# `render_frames` and `scanline_overlay` are exported but were never reached by
+# a test — the node layer paints frame by frame and uses the full CRT, so both
+# are API for callers outside this repo, which is exactly the code that breaks
+# quietly.
+
+
+class TestRenderFrames:
+    def test_stacks_a_sequence(self) -> None:
+        frames = [convert(np.full((SCREEN_H, SCREEN_W, 3), v, dtype=np.uint8), Settings())
+                  for v in (10, 200)]
+        out = render_frames(frames, scale=2)
+        assert out.shape == (2, SCREEN_H * 2, SCREEN_W * 2, 3)
+        assert out.dtype == np.uint8
+        for index, frame in enumerate(frames):
+            assert np.array_equal(out[index], render_frame(frame, 2))
+
+    def test_an_empty_sequence_keeps_the_scaled_shape(self) -> None:
+        """Zero frames still has to say what shape a frame would have been."""
+        out = render_frames([], scale=3)
+        assert out.shape == (0, SCREEN_H * 3, SCREEN_W * 3, 3)
+        assert out.dtype == np.uint8
+
+
+class TestScanlineOverlay:
+    @staticmethod
+    def flat() -> np.ndarray:
+        return np.full((16, 16, 3), 200, dtype=np.uint8)
+
+    def test_darkens_the_last_row_of_each_group(self) -> None:
+        out = scanline_overlay(self.flat(), strength=0.5, scale=4)
+        assert (out[3] == 100).all()
+        assert (out[0] == 200).all()
+
+    def test_scale_one_has_no_room_for_a_line(self) -> None:
+        image = self.flat()
+        assert scanline_overlay(image, strength=0.5, scale=1) is image
+
+    def test_zero_strength_is_a_bypass(self) -> None:
+        image = self.flat()
+        assert scanline_overlay(image, strength=0.0, scale=4) is image
+
+    def test_strength_is_clamped(self) -> None:
+        # Past 1 would drive the row negative and wrap on the cast back to uint8.
+        out = scanline_overlay(self.flat(), strength=5.0, scale=2)
+        assert out.min() == 0
+
+
+def test_charset_row_bytes_is_the_loader_row_data() -> None:
+    for charset in (0, 1):
+        assert np.array_equal(charset_row_bytes(charset), charset_bytes(charset))
+
+
+def test_a_single_image_batch_takes_the_short_path() -> None:
+    """One frame never reaches the pool, whatever the worker count says."""
+    image = np.full((SCREEN_H, SCREEN_W, 3), 90, dtype=np.uint8)
+    only, = convert_batch([image], Settings(), workers=8)
+    assert np.array_equal(only.screen, convert(image, Settings()).screen)
+
+
+# ------------------------------------------------- small exported surfaces
+#
+# Each of these is public API that the node layer happens not to use, which is
+# how they reached 200 tests without one of them being called.
+
+
+class TestPetsciiFrameHelpers:
+    @staticmethod
+    def made() -> PetsciiFrame:
+        return convert(np.full((SCREEN_H, SCREEN_W, 3), 120, dtype=np.uint8), Settings())
+
+    def test_as_grid_is_row_major(self) -> None:
+        frame = self.made()
+        screen, color = frame.as_grid()
+        assert screen.shape == (ROWS, COLS)
+        assert color.shape == (ROWS, COLS)
+        # Row-major: cell 41 is row 1, column 1.
+        assert screen[1, 1] == frame.screen[COLS + 1]
+
+    def test_copy_does_not_share_its_arrays(self) -> None:
+        frame = self.made()
+        clone = frame.copy()
+        clone.screen[0] = (int(frame.screen[0]) + 1) % 256
+        clone.color[0] = (int(frame.color[0]) + 1) % 16
+        assert frame.screen[0] != clone.screen[0]
+        assert frame.color[0] != clone.color[0]
+        assert (clone.bg, clone.border, clone.charset) == (frame.bg, frame.border, frame.charset)
+
+
+class TestContainFraming:
+    """§5's letterbox branch — bars on whichever axis is short."""
+
+    def test_a_wide_source_gets_bars_top_and_bottom(self) -> None:
+        wide = np.full((100, 800, 3), 255, dtype=np.uint8)
+        out = frame_to_screen(wide, "contain")
+        assert out.shape == (SCREEN_H, SCREEN_W, 3)
+        assert (out[0] == 0).all()
+        assert (out[SCREEN_H // 2] == 255).all()
+
+    def test_a_tall_source_gets_bars_left_and_right(self) -> None:
+        tall = np.full((400, 100, 3), 255, dtype=np.uint8)
+        out = frame_to_screen(tall, "contain")
+        assert (out[:, 0] == 0).all()
+        assert (out[:, SCREEN_W // 2] == 255).all()
+
+    def test_an_unknown_mode_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="unknown framing mode"):
+            frame_to_screen(np.zeros((10, 10, 3), dtype=np.uint8), "fill")
+
+
+def test_add_border_with_no_thickness_is_a_bypass() -> None:
+    image = np.zeros((8, 8, 3), dtype=np.uint8)
+    assert add_border(image, 5, 0) is image
+
+
+def test_clamp_oklab_holds_the_dither_bounds() -> None:
+    """§4.7 pushes residuals into the working buffer, which is what can leave range."""
+    lab = np.array([[[-9.0, 9.0, -9.0]]], dtype=np.float32)
+    out = clamp_oklab(lab)
+    assert (out >= OKLAB_MIN).all()
+    assert (out <= OKLAB_MAX).all()
+
+
+def test_dithering_honours_a_locked_background() -> None:
+    """§4.7 picks bg from the un-dithered image — unless it was given one."""
+    rng = np.random.default_rng(5)
+    image = (rng.random((SCREEN_H, SCREEN_W, 3)) * 255).astype(np.uint8)
+    frame = convert(image, Settings(dither=True, bg_lock=11))
+    assert frame.bg == 11
+
+
+def test_cover_crops_a_tall_source_top_and_bottom() -> None:
+    """§5's other cover branch: the source is taller than 8:5, so height is cut."""
+    tall = np.zeros((400, 320, 3), dtype=np.uint8)
+    tall[150:250] = 255  # a band across the vertical middle
+    out = frame_to_screen(tall, "cover")
+    assert out.shape == (SCREEN_H, SCREEN_W, 3)
+    # The centre crop keeps the band and drops the black above and below it.
+    assert (out[SCREEN_H // 2] == 255).all()

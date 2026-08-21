@@ -105,7 +105,8 @@ than merely on the prose describing it.
 
 ```sh
 uv venv && uv pip install -e ".[dev]"
-pytest -q          # 189 tests, ~7s
+pytest -q          # 254 tests, ~10s
+pytest -q --cov    # the same, with the coverage gate CI enforces
 uvx ruff check .   # ruff is configured but not a dev dependency
 ```
 

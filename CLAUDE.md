@@ -13,7 +13,8 @@ other port. Parity between the two is the central constraint on this codebase.
 
 ```sh
 uv venv && uv pip install -e ".[dev]"   # setup (torch is a test-only dev dep)
-.venv/bin/python -m pytest -q            # full suite (189 tests, ~7s)
+.venv/bin/python -m pytest -q            # full suite (254 tests, ~10s)
+.venv/bin/python -m pytest -q --cov      # with the 100% gate CI enforces
 .venv/bin/python -m pytest tests/test_parity.py -q          # one file
 .venv/bin/python -m pytest tests/test_parity.py -k ui -q    # one case
 python sync_shared.py                    # mirror shared/*.json into the package
@@ -122,3 +123,48 @@ A clip is a batch and a batch can be thousands of frames, which is why:
   every later value in the bundled examples under `workflows/`, which still load
   and quietly run with the wrong settings — `tests/test_nodes.py` counts them
   against the schemas to catch exactly that.
+
+## Coverage is a gate, not a report
+
+The suite is at 100% and `[tool.coverage.report] fail_under` holds it there. The
+argument for a lower number is always that some particular line is not worth
+testing, and the ones here that genuinely are not — the `_interrupted` import
+fallback — are marked `# pragma: no cover`. Coverage is deliberately off the
+default `pytest` run so the local loop stays fast; `--cov` turns it on and CI
+always passes it.
+
+What that exercise actually found was not obscure branches. It was whole
+exported functions the node layer happens not to call — `render_frames`,
+`scanline_overlay`, `PetsciiFrame.as_grid` — and every one of the `.petv`
+reader's refusals. The refusals matter most: `.petv` is what the two ports
+exchange, and reading past a truncated record does not raise on its own, it
+hands numpy whatever bytes came next and produces a frame.
+
+## What is parallel, and what may not be
+
+Painting (`_render_all`) and non-temporal conversion (`iter_convert_batch`) run on
+a `ThreadPoolExecutor`. Threads, not processes: numpy drops the GIL for the dense
+float32 work, and a painted 8x frame is 12 MB that a process pool would have to
+pickle back. Both drain **in order** behind a window of two items per worker —
+the window keeps a long clip from holding hundreds of painted frames at once, and
+in-order draining is what keeps progress monotonic and leaves one obvious place
+for the interrupt check.
+
+The temporal path is sequential and must stay that way: hysteresis reads the
+previous frame's choices, and the background is voted once over the clip and
+locked. `iter_convert_batch` ignores `workers` when `temporal=True` rather than
+quietly honouring it, and a test pins that.
+
+The first item is always processed on the calling thread, both to learn the
+output shape and to warm the `lru_cache`d charset and palette data before any
+worker reaches it.
+
+## The output batch has a ceiling
+
+An IMAGE output is one contiguous float32 tensor and it grows with the square of
+the render scale — 1000 frames is 0.8 GB at 1x and 46 GB at 8x. `_allocate_batch`
+checks that up front, because the allocation is not a check: Linux overcommit and
+macOS's lazy mapping both hand back the 46 GB tensor and report success. Reading
+the budget is best-effort and dependency-free — Linux reports free memory through
+`sysconf`, macOS has `SC_PHYS_PAGES` but no `SC_AVPHYS_PAGES` so it falls back to
+installed, and Windows has no `sysconf` at all and the allocation just proceeds.

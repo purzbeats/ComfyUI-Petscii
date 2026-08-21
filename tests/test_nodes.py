@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import pathlib
 import struct
+import types
 
 import numpy as np
 import pytest
@@ -220,6 +222,133 @@ def test_render_all_matches_frame_by_frame_painting() -> None:
     for index, source in enumerate(frames):
         expected = nodes._paint(source, 1, 2, None)
         assert np.array_equal(np.rint(out[index].numpy() * 255.0).astype(np.uint8), expected)
+
+
+# ------------------------------------------------------------ memory guard
+
+
+def test_allocate_batch_returns_the_right_tensor() -> None:
+    out = nodes._allocate_batch(3, 8, 10, scale=1)
+    assert out.shape == (3, 8, 10, 3)
+    assert out.dtype == torch.float32
+
+
+def test_allocate_batch_refuses_what_will_not_fit(monkeypatch) -> None:
+    """A batch bigger than free memory fails with the two knobs that fix it."""
+    monkeypatch.setattr(nodes, "_memory_ceiling", lambda: (1024**3, "free"))
+
+    with pytest.raises(MemoryError) as excinfo:
+        nodes._allocate_batch(1000, 1600, 2560, scale=8)
+
+    message = str(excinfo.value)
+    assert "render scale" in message
+    assert "fewer frames" in message
+    assert "GiB" in message
+
+
+def test_allocate_batch_proceeds_when_memory_is_unknown(monkeypatch) -> None:
+    """No sysconf — Windows — must not become a refusal to render."""
+    monkeypatch.setattr(nodes, "_memory_ceiling", lambda: None)
+    assert nodes._allocate_batch(2, 8, 10, scale=1).shape == (2, 8, 10, 3)
+
+
+def test_allocate_batch_translates_an_allocation_failure(monkeypatch) -> None:
+    """Overcommit means the up-front check can pass and the allocation still fail."""
+    monkeypatch.setattr(nodes, "_memory_ceiling", lambda: None)
+
+    def refuse(*args, **kwargs):
+        raise RuntimeError("[enforce fail at alloc_cpu.cpp:117]")
+
+    monkeypatch.setattr(nodes.torch, "empty", refuse)
+    with pytest.raises(MemoryError, match="render scale"):
+        nodes._allocate_batch(4, 8, 10, scale=1)
+
+
+def test_memory_ceiling_is_a_size_and_a_kind_or_none() -> None:
+    """
+    Whatever this platform reports has to be usable, not merely present.
+
+    Linux answers "free", macOS only "installed", Windows neither — and the
+    macOS case is the one that regressed once already, by asking for
+    SC_AVPHYS_PAGES alone and silently getting nothing back.
+    """
+    ceiling = nodes._memory_ceiling()
+    if ceiling is None:
+        return
+    size, kind = ceiling
+    assert size > 0
+    assert kind in {"free", "installed"}
+
+
+# --------------------------------------------------------- parallel painting
+
+
+def test_render_all_threaded_matches_serial(monkeypatch) -> None:
+    """
+    The pool must not change a single pixel.
+
+    Painting is per-frame and pure, so this is really a check that no thread is
+    sharing a buffer with another — the failure mode would be intermittent, and
+    an equality test over enough frames is what makes it deterministic.
+    """
+    frames = [frame(value=v, bg=v % 16, border=(v + 3) % 16) for v in range(9)]
+    data = PetsciiData(frames=frames, charset=0)
+
+    monkeypatch.setattr(nodes, "_paint_workers", lambda count: 1)
+    serial = run(nodes._render_all(data, scale=2, border=2, report=False))
+
+    monkeypatch.setattr(nodes, "_paint_workers", lambda count: 4)
+    threaded = run(nodes._render_all(data, scale=2, border=2, report=False))
+
+    assert torch.equal(serial, threaded)
+
+
+def test_render_all_threaded_reports_every_frame_in_order(progress) -> None:
+    data = PetsciiData(frames=[frame(value=v) for v in range(6)], charset=0)
+    run(nodes._render_all(data, scale=1, border=0, report=True))
+    assert progress == [(index + 1, 6) for index in range(6)]
+
+
+def test_paint_workers_stays_within_the_batch() -> None:
+    # One frame never pays for a pool, and a short batch never spins up more
+    # threads than it has work for.
+    assert nodes._paint_workers(1) == 1
+    assert nodes._paint_workers(2) <= 2
+    assert nodes._paint_workers(1000) <= 8
+
+
+def test_render_all_threaded_propagates_an_interrupt(monkeypatch) -> None:
+    """An interrupt must surface, not be swallowed by the pool's shutdown."""
+    calls = {"n": 0}
+
+    def interrupt_on_the_third_frame() -> None:
+        calls["n"] += 1
+        if calls["n"] >= 3:
+            raise KeyboardInterrupt("stopped")
+
+    monkeypatch.setattr(nodes, "_interrupted", interrupt_on_the_third_frame)
+    monkeypatch.setattr(nodes, "_paint_workers", lambda count: 4)
+    data = PetsciiData(frames=[frame(value=v) for v in range(40)], charset=0)
+
+    with pytest.raises(KeyboardInterrupt):
+        run(nodes._render_all(data, scale=1, border=0, report=False))
+
+
+def test_render_all_threaded_surfaces_a_painting_failure(monkeypatch) -> None:
+    """A frame that fails to paint must raise, not hang on the queue."""
+    real = nodes._paint
+
+    def fail_on_the_fifth(frame_, scale, border, crt):
+        if frame_.bg == 5:
+            raise ValueError("bad frame")
+        return real(frame_, scale, border, crt)
+
+    monkeypatch.setattr(nodes, "_paint", fail_on_the_fifth)
+    monkeypatch.setattr(nodes, "_paint_workers", lambda count: 4)
+    data = PetsciiData(frames=[frame(value=v, bg=v) for v in range(9)], charset=0)
+
+    with pytest.raises(ValueError, match="bad frame"):
+        run(nodes._render_all(data, scale=1, border=0, report=False))
 
 
 # ------------------------------------------------------------------ preview
@@ -684,3 +813,119 @@ def test_every_workflow_input_file_is_shipped() -> None:
             if entry["type"] == "LoadImage":
                 name = entry["widgets_values"][0]
                 assert name in available, f"{path.name} loads {name}, which is not in example_inputs/"
+
+
+# --------------------------------------------------- the rest of the surface
+
+
+def test_render_all_serial_path_still_reports(progress, monkeypatch) -> None:
+    """One worker is a real path — a single-core host takes it for every clip."""
+    monkeypatch.setattr(nodes, "_paint_workers", lambda count: 1)
+    data = PetsciiData(frames=[frame(value=v) for v in range(4)], charset=0)
+    run(nodes._render_all(data, scale=1, border=0, report=True))
+    assert progress == [(index + 1, 4) for index in range(4)]
+
+
+def test_dithering_a_sequence_warns_that_it_will_crawl(previews, caplog) -> None:
+    """§4.7 cannot be made temporally stable, and silence would look like it can."""
+    batch = torch.cat([image(seed=i) for i in range(2)])
+    with caplog.at_level(logging.WARNING):
+        run(PETSCIIConvert.execute(image=batch, dither=True, **_convert_kwargs()))
+    assert "cannot be made temporally stable" in caplog.text
+
+
+def test_dithering_a_single_still_says_nothing(previews, caplog) -> None:
+    with caplog.at_level(logging.WARNING):
+        run(PETSCIIConvert.execute(image=image(), dither=True, **_convert_kwargs()))
+    assert caplog.text == ""
+
+
+def test_render_warns_when_the_scale_cannot_show_scanlines(previews, caplog) -> None:
+    data = PetsciiData(frames=[frame()], charset=0)
+    with caplog.at_level(logging.WARNING):
+        run(PETSCIIRender.execute(petscii=data, **_render_kwargs(scale=2, crt=True)))
+    assert "no room for scanlines" in caplog.text
+
+
+def test_comfy_entrypoint_returns_the_extension() -> None:
+    extension = run(nodes.comfy_entrypoint())
+    assert isinstance(extension, nodes.PetsciiExtension)
+
+
+def test_stream_fps_falls_back_for_a_single_frame() -> None:
+    """One frame carries no gap, so there is no rate to derive — 30 is the default."""
+
+    one_frame = types.SimpleNamespace(frames=[types.SimpleNamespace(dt_ms=0)])
+    assert nodes._stream_fps(one_frame) == 30.0
+
+
+def test_load_petv_rejects_a_headerless_stream(tmp_path, monkeypatch) -> None:
+    """A valid header with no records is a file that parses to nothing."""
+    from petscii_core.petv import MAGIC
+
+    _fake_folder_paths(monkeypatch, tmp_path)
+    (tmp_path / "input" / "empty.petv").write_bytes(MAGIC + bytes([1, 0, 0, 0]))
+
+    with pytest.raises(ValueError, match="holds no frames"):
+        run(PETSCIILoadPETV.execute(petv="empty.petv", fps=0.0))
+
+
+def test_fingerprint_of_a_vanished_file_is_not_a_number(tmp_path, monkeypatch) -> None:
+    """NaN never equals itself, so a missing file always counts as changed."""
+    _fake_folder_paths(monkeypatch, tmp_path)
+    stamp = PETSCIILoadPETV.fingerprint_inputs(petv="gone.petv")
+    assert stamp != stamp
+
+
+def test_memory_ceiling_without_sysconf_is_unknown(monkeypatch) -> None:
+    """Windows: no sysconf at all, so nothing can be checked ahead of time."""
+    monkeypatch.delattr(nodes.os, "sysconf", raising=False)
+    assert nodes._memory_ceiling() is None
+
+
+# These two stand in for platforms other than whichever one is running them, so
+# they install a `sysconf` outright rather than wrapping the real one —
+# `raising=False` because on Windows there is no attribute there to replace, and
+# a test about Windows must not be the one that cannot run on Windows.
+
+
+def test_memory_ceiling_ignores_names_this_platform_lacks(monkeypatch) -> None:
+    """macOS has SC_PHYS_PAGES and not SC_AVPHYS_PAGES; both must be tried."""
+
+    def only_total(name):
+        if name == "SC_PAGE_SIZE":
+            return 4096
+        if name == "SC_PHYS_PAGES":
+            return 1024
+        raise ValueError("unrecognized configuration name")
+
+    monkeypatch.setattr(nodes.os, "sysconf", only_total, raising=False)
+    assert nodes._memory_ceiling() == (4096 * 1024, "installed")
+
+
+def test_memory_ceiling_prefers_free_over_installed(monkeypatch) -> None:
+    """Linux reports both, and free is the number worth checking against."""
+
+    def both(name):
+        return {"SC_PAGE_SIZE": 4096, "SC_AVPHYS_PAGES": 100, "SC_PHYS_PAGES": 1024}[name]
+
+    monkeypatch.setattr(nodes.os, "sysconf", both, raising=False)
+    assert nodes._memory_ceiling() == (4096 * 100, "free")
+
+
+def test_memory_ceiling_rejects_a_nonsense_page_count(monkeypatch) -> None:
+    """Some containers answer zero or -1 rather than failing."""
+    monkeypatch.setattr(
+        nodes.os, "sysconf", lambda name: 4096 if name == "SC_PAGE_SIZE" else 0, raising=False
+    )
+    assert nodes._memory_ceiling() is None
+
+
+def test_load_petv_accepts_a_file_that_is_there(tmp_path, monkeypatch) -> None:
+    """The three answers `validate_inputs` can give, and this is the yes."""
+    _fake_folder_paths(monkeypatch, tmp_path)
+    (tmp_path / "input" / "clip.petv").write_bytes(b"whatever")
+
+    assert PETSCIILoadPETV.validate_inputs(petv="clip.petv") is True
+    assert PETSCIILoadPETV.validate_inputs(petv="") != True  # noqa: E712
+    assert "not in the input directory" in PETSCIILoadPETV.validate_inputs(petv="absent.petv")

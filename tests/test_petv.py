@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import struct
 
 import numpy as np
@@ -192,3 +193,65 @@ def test_thirty_fps_alternates_the_gap() -> None:
     base = frame(12)
     stream = read_petv(encode_petv([base] + [nudge(base, 3) for _ in range(6)], fps=30))
     assert [f.dt_ms for f in stream.frames] == [0, 33, 34, 33, 33, 34, 33]
+
+
+class TestMalformedStreams:
+    """
+    The reader's refusals — core-spec §8.1's framing rules seen from the outside.
+
+    `.petv` is what the two ports exchange, so every one of these is a shape the
+    other implementation could emit from a bug, or a file could acquire from a
+    half-finished write. Reading past the end of a truncated record would give
+    numpy whatever bytes followed it and produce a frame rather than an error.
+    """
+
+    @staticmethod
+    def stream() -> bytes:
+        base = frame(4)
+        return encode_petv([base, nudge(base, 12)], fps=30)
+
+    def test_a_short_header_is_not_a_stream(self) -> None:
+        with pytest.raises(ValueError, match=re.escape("not a .petv stream")):
+            read_petv(b"PET")
+
+    def test_a_foreign_magic_is_not_a_stream(self) -> None:
+        with pytest.raises(ValueError, match=re.escape("not a .petv stream")):
+            read_petv(b"PETX" + self.stream()[4:])
+
+    def test_a_truncated_keyframe_is_refused(self) -> None:
+        # Inside the keyframe body, not before it: cut the stream short enough
+        # and it stops being a stream at all, which is a different refusal.
+        with pytest.raises(ValueError, match="truncated in a keyframe"):
+            read_petv(self.stream()[: 8 + 5 + 500])
+
+    def test_a_truncated_delta_header_is_refused(self) -> None:
+        data = self.stream()
+        # The delta record starts after the header and the whole keyframe.
+        delta_at = 8 + 5 + CELLS * 2
+        with pytest.raises(ValueError, match="truncated in a delta header"):
+            read_petv(data[: delta_at + 3])
+
+    def test_a_truncated_delta_body_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="truncated in a delta body"):
+            read_petv(self.stream()[:-8])
+
+    def test_a_delta_index_past_the_screen_is_refused(self) -> None:
+        data = bytearray(self.stream())
+        # First index of the delta body: past the header, the keyframe, the
+        # frame head and the count.
+        body_at = 8 + 5 + CELLS * 2 + 5 + 2
+        data[body_at : body_at + 2] = struct.pack("<H", CELLS + 7)
+        with pytest.raises(ValueError, match="out of range"):
+            read_petv(bytes(data))
+
+    def test_an_unknown_record_type_is_refused(self) -> None:
+        data = bytearray(self.stream())
+        data[8] = 0x7E
+        with pytest.raises(ValueError, match=re.escape("unknown .petv record type 0x7e")):
+            read_petv(bytes(data))
+
+
+def test_an_fps_slower_than_the_gap_field_is_refused() -> None:
+    """dt_ms is 16 bits, so anything under about 0.016 fps cannot be expressed."""
+    with pytest.raises(ValueError, match="past the 65535 ms field"):
+        encode_petv([frame(2)], fps=0.01)
