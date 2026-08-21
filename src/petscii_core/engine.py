@@ -253,6 +253,20 @@ def masked_sums(d: np.ndarray, charset: int) -> np.ndarray:
     return np.einsum("cpk,gp->cgk", d, glyph_masks(charset), optimize=True).astype(np.float32)
 
 
+def _min_and_argmin(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    The minimum along the palette axis and the index that produced it.
+
+    Calling ``min`` and ``argmin`` separately walks a ``(1000, 128, 16)`` array
+    twice; taking the value at the index numpy already found walks it once and a
+    gather. Same value by definition — it is the element ``argmin`` selected —
+    and the tie-break is still ``argmin``'s first occurrence, which is §4.4's
+    "lowest colour index on a tie".
+    """
+    index = values.argmin(axis=2)
+    return np.take_along_axis(values, index[..., None], axis=2)[..., 0], index
+
+
 def glyph_minima(a: np.ndarray, s: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Best foreground per glyph for both branches of §4.3.
@@ -260,13 +274,10 @@ def glyph_minima(a: np.ndarray, s: np.ndarray) -> tuple[np.ndarray, np.ndarray, 
     ``argmin`` returns the first occurrence, which is the spec's "lowest colour
     index on a tie" (§4.4) for free.
     """
-    min_normal = a.min(axis=2)
-    fg_normal = a.argmin(axis=2).astype(np.uint8)
+    min_normal, fg_normal = _min_and_argmin(a)
     # The inverse glyph paints f outside the mask: S[f] - A[g][f].
-    inverse = s[:, None, :] - a
-    min_inverse = inverse.min(axis=2)
-    fg_inverse = inverse.argmin(axis=2).astype(np.uint8)
-    return min_normal, fg_normal, min_inverse, fg_inverse
+    min_inverse, fg_inverse = _min_and_argmin(s[:, None, :] - a)
+    return min_normal, fg_normal.astype(np.uint8), min_inverse, fg_inverse.astype(np.uint8)
 
 
 def _errors_for_background(

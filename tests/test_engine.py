@@ -572,3 +572,24 @@ class TestParallelBatch:
         # An explicit request wins, and never lands below one.
         assert convert_workers(10_000, 3) == 3
         assert convert_workers(10_000, 0) == 1
+
+
+def test_glyph_minima_matches_a_separate_min_and_argmin() -> None:
+    """
+    `_min_and_argmin` takes the value at the index rather than reducing twice.
+
+    That is the same element by definition, so this is really a guard on the
+    shapes and the axis — get either wrong and the values still look plausible
+    while belonging to the wrong glyph.
+    """
+    rng = np.random.default_rng(19)
+    a = rng.random((40, 128, 16)).astype(np.float32)
+    s = rng.random((40, 16)).astype(np.float32)
+
+    min_normal, fg_normal, min_inverse, fg_inverse = glyph_minima(a, s)
+    inverse = s[:, None, :] - a
+
+    assert np.array_equal(min_normal, a.min(axis=2))
+    assert np.array_equal(fg_normal, a.argmin(axis=2).astype(np.uint8))
+    assert np.array_equal(min_inverse, inverse.min(axis=2))
+    assert np.array_equal(fg_inverse, inverse.argmin(axis=2).astype(np.uint8))
