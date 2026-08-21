@@ -1,0 +1,136 @@
+# Parity with the TypeScript reference is this pack's central claim, and until
+# now nothing checked it anywhere but on the author's laptop. The whole suite is
+# ten seconds, so there is no reason for any of this to be sampled.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_COLOR: "1"
+
+jobs:
+  test:
+    name: ${{ matrix.os }} · py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every supported Python on Linux, and one each on the other two. The
+        # operating systems are not decoration: `_memory_ceiling` reads free
+        # memory on Linux, installed memory on macOS because it has no
+        # SC_AVPHYS_PAGES, and nothing at all on Windows, which has no sysconf.
+        # Those are three different code paths and one of them was already
+        # silently wrong once.
+        os: [ubuntu-latest]
+        python: ["3.10", "3.11", "3.12", "3.13"]
+        include:
+          - os: macos-latest
+            python: "3.12"
+          - os: windows-latest
+            python: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv venv --python ${{ matrix.python }}
+      - run: uv pip install -e ".[dev]"
+      - name: pytest
+        run: uv run --no-project pytest -q
+
+  numpy-floor:
+    # pyproject promises numpy>=1.24, and the fixtures were frozen against
+    # whatever was current. §4.4 decides ties on float32 argmin, so "the
+    # declared floor still reproduces the reference" is a claim with real
+    # content — and one nobody had ever checked.
+    #
+    # No torch here on purpose. Recent torch wheels pull numpy 2 in behind you,
+    # which would quietly turn this into a second copy of the job above.
+    name: numpy floor (1.24, no torch)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv venv --python 3.10
+      - run: uv pip install "numpy==1.24.4" "pytest>=8" "pillow>=10"
+      - name: pytest
+        run: uv run --no-project pytest -q
+      - name: the node tests must skip, not error
+        # Without torch the node layer cannot even be imported, and the pack's
+        # claim is that this is fine — the engine and the parity suite stand on
+        # numpy alone. "0 failed" would also be true of a file that failed to
+        # collect, so this looks for the skip itself.
+        run: |
+          uv run --no-project pytest tests/test_nodes.py -q -rs | tee out.txt
+          grep -q "skipped" out.txt
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv venv --python 3.12
+      - run: uv pip install -e ".[dev]"
+      - name: pytest --cov
+        # The threshold lives in pyproject; failing under it fails the job.
+        run: uv run --no-project pytest -q --cov
+
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uvx ruff check .
+
+  shared-data:
+    # `src/petscii_core/data/` is a mirror of `shared/` that exists only because
+    # a wheel cannot reach outside its package. tests/test_data.py fails on
+    # drift, but running sync_shared.py here proves the generator agrees with
+    # what is committed rather than just that the two copies match each other.
+    name: shared/ mirror is in sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # sync_shared.py is shutil and pathlib — it needs no dependencies at all.
+      - run: python sync_shared.py
+      - name: sync_shared.py must be a no-op on a clean tree
+        run: git diff --exit-code
+
+  build:
+    # The wheel ships `petscii_core` and its JSON and nothing else — the nodes
+    # themselves arrive by dropping the directory into custom_nodes. pyproject
+    # carries a warning about this: the data lives inside the package, and
+    # adding a force-include to "make sure" duplicates every file and fails the
+    # build. Which way it currently sits is invisible from a git clone, where
+    # everything works either way.
+    name: wheel carries the package data
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv build
+      - name: the data ships, exactly once, and the tests do not
+        run: |
+          python -m zipfile -l dist/*.whl > listing.txt
+          cat listing.txt
+          for name in palette charset subsets; do
+            test "$(grep -c "petscii_core/data/$name.json" listing.txt)" = 1
+          done
+          ! grep -qE "fixtures/|tests/" listing.txt

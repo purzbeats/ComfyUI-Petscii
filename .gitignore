@@ -7,3 +7,7 @@ dist/
 build/
 .DS_Store
 node.zip
+.coverage
+.coverage.*
+htmlcov/
+.ruff_cache/
